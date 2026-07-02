@@ -1,0 +1,31 @@
+# Backup folders
+Backup/
+
+# Nested git repositories  
+testV3/
+
+# IDE files
+*.sln
+*.suo
+*.user
+*.cache
+*.log
+.vscode/
+.idea/
+
+# Compiled files
+*.ex4
+*.ex5
+*.dll
+
+# Temporary files
+*.tmp
+*.temp
+
+# Log files
+*.log
+logs/
+
+# OS files
+Thumbs.db
+.DS_Store
