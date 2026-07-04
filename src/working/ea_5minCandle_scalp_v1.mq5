@@ -1,16 +1,17 @@
 ﻿//+------------------------------------------------------------------+
-//|                                        ea_5minCandle_scalp_v4.mq5 |
+//|                                          ea_5minCandle_scalp.mq5 |
 //|                                  Copyright 2025, MetaQuotes Ltd. |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.00"
+#property version   "1.00"
 
 //+------------------------------------------------------------------+
-//| M5 Candle Scalper v4 — Optimized Entry Filters                   |
-//| Lower entry thresholds for more trades on both sides             |
-//| Same optimized exit logic as v3                                  |
+//| M5 Candle Scalper v2 — "Confirm Then Enter"                      |
+//| Waits for M1 confirmation within the M5 candle before entering   |
+//| Uses M5 + M15 + H1 multi-timeframe alignment                    |
+//| Exits at candle close or profit target                           |
 //+------------------------------------------------------------------+
 
 #include <Trade/Trade.mqh>
@@ -22,64 +23,59 @@ CTrade trade;
 input double LotSize = 0.10;
 input long MagicNumber = 20260607;
 
-//=== DYNAMIC SL/TP OPTIMIZATION (NEW v3) ===
-input bool UseDynamic_SLTP = true;        // Use dynamic ATR-based SL/TP with volatility adjustment
-input double ATR_SL_Mult = 1.2;           // REDUCED from 1.5 - tighter stop, less loss per trade
-input double ATR_TP_Mult = 3.0;           // INCREASED from 2.5 - better reward ratio
-input double Min_RR_Ratio = 1.5;          // Minimum Risk-Reward ratio required
-input double Max_TP_Points = 150;         // Cap TP at this many points (avoid too high)
-input double Min_TP_Points = 40;          // Minimum TP to ensure worthwhile trades
+//=== #1 + #2 ATR-BASED SL/TP (fixes bad risk-reward) ===
+input bool UseATR_SLTP = true;            // Use ATR-based SL/TP instead of fixed
+input double ATR_SL_Mult = 1.5;           // SL = ATR(M5) * this
+input double ATR_TP_Mult = 2.5;           // TP = ATR(M5) * this (bigger than SL)
+input int Fallback_SL_Points = 150;       // Used if UseATR_SLTP = false
+input double TakeProfit_Dollars = 12.03;  // Hard dollar TP (still active as a cap)
 
-//=== #3 HOLD WINNERS PAST CANDLE (IMPROVED) ===
-input bool HoldWinnersPastCandle = true;
-input double HoldMinProfitPoints = 20;    // REDUCED from 30 - catch smaller trends
-input double HoldTrailBuffer = 10;        // Keep trail buffer this far behind price
+//=== #3 HOLD WINNERS PAST CANDLE ===
+input bool HoldWinnersPastCandle = true;  // Don't force-close profitable trending trades
+input double HoldMinProfitPoints = 30;    // Must be this far in profit to hold past candle
 
-//=== #4 TRAILING STOP (OPTIMIZED) ===
+//=== #4 TRAILING STOP ===
 input bool UseTrailingStop = true;
-input double Trail_ATR_Mult = 0.8;        // REDUCED from 1.0 - tighter trail
-input int Trail_StartPoints = 25;         // REDUCED from 40 - trail earlier
-input int Trail_StepPoints = 15;          // Move SL by this much when trailing
+input double Trail_ATR_Mult = 1.0;        // Trail distance = ATR * this
+input int Trail_StartPoints = 40;         // Start trailing after this much profit
 
-//=== #5 MTF SCORING ===
-input bool UseMTF_Scoring = true;
-input int MTF_MinScore = 2;
+//=== #5 MTF SCORING (vs strict alignment) ===
+input bool UseMTF_Scoring = true;         // Use score instead of requiring all TFs
+input int MTF_MinScore = 2;               // Need at least this many TFs agreeing (of 3)
 
 //=== #6 DAILY LIMITS + RISK SIZING ===
-input bool UseRiskSizing = true;
-input double RiskPercent = 0.5;           // Reduced to 0.5% for safer trading
+input bool UseRiskSizing = true;          // Scale lot by risk %
+input double RiskPercent = 1.0;           // Risk % of balance per trade
 input double MaxLot = 1.0;
 input double MinLot = 0.01;
-
-//=== DAILY LIMITS (for safety) ===
-input bool UseDailyLimits = false;        // Disabled - trades continue all day
-input double DailyProfitTarget = 100.0;
-input double DailyLossLimit = 50.0;
+input bool UseDailyLimits = true;
+input double DailyProfitTarget = 100.0;   // Stop after +$X
+input double DailyLossLimit = 50.0;       // Stop after -$X
 
 //=== CONFIRMATION ENTRY SETTINGS ===
-input int ConfirmWaitBars = 1;
-input double MinM1ConfirmBody = 8.0;      // Reduced to catch more confirmations
-input bool RequireM1BreakHigh = true;
-input bool RequireM1BreakLow = true;
+input int ConfirmWaitBars = 1;            // Wait this many M1 bars for confirmation (1-2)
+input double MinM1ConfirmBody = 10.0;     // Confirmation M1 candle must have this body size (pts)
+input bool RequireM1BreakHigh = true;     // For BUY: M1 must break above M5 open price
+input bool RequireM1BreakLow = true;      // For SELL: M1 must break below M5 open price
 
 //=== MULTI-TIMEFRAME FILTER ===
-input bool UseMTF_Filter = true;
-input int EMA_Fast_Period = 9;
-input int EMA_Slow_Period = 21;
+input bool UseMTF_Filter = true;          // Require M5 + M15 + H1 agreement
+input int EMA_Fast_Period = 9;            // Fast EMA (M5)
+input int EMA_Slow_Period = 21;           // Slow EMA (M5)
 
 //=== MOMENTUM & FILTERS ===
-input int MomentumCandles = 3;
-input double MinAvgBody_Points = 10.0;    // REDUCED from 15.0 - catch more setups
-input double MinATR_Points = 15.0;        // REDUCED from 25.0 - more entry opportunities
-input double RSI_BuyAbove = 51.0;         // REDUCED from 52.0 - more BUY opportunities
-input double RSI_SellBelow = 47.0;        // REDUCED from 48.0 - more SELL opportunities
+input int MomentumCandles = 3;            // Previous M5 candles to check
+input double MinAvgBody_Points = 20.0;    // Skip if previous candles too small
+input double MinATR_Points = 30.0;        // Skip if ATR too low (dead market)
+input double RSI_BuyAbove = 50.0;
+input double RSI_SellBelow = 50.0;
 
-//=== AI BIAS ===
+//=== AI BIAS (Optional) ===
 input bool UseAI_Bias = true;
 input int AI_RefreshSeconds = 60;
 input string OpenAI_ApiKey = "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";
 input string OpenAI_Model = "gpt-4o-mini";
-input int AI_ConfidenceThreshold = 70;    // Increased threshold for better quality signals
+input int AI_ConfidenceThreshold = 65;
 
 //=== GLOBAL STATE ===
 datetime LastM5CandleTime = 0;
@@ -87,10 +83,10 @@ datetime LastAIRequest = 0;
 string AI_Bias = "NONE";
 int AI_Confidence = 0;
 bool TradeOpenThisCandle = false;
-bool DirectionDecided = false;
-string CandleDirection = "NONE";
-int M1BarsElapsed = 0;
-datetime LastM1Time = 0;
+bool DirectionDecided = false;            // Have we decided direction for this candle?
+string CandleDirection = "NONE";          // Decided direction: BUY, SELL, SKIP
+int M1BarsElapsed = 0;                    // How many M1 bars since M5 candle opened
+datetime LastM1Time = 0;                  // Track M1 bar changes
 int TodayTrades = 0;
 int TodayWins = 0;
 int TodayLosses = 0;
@@ -98,28 +94,29 @@ int LastTradeDay = -1;
 double DailyStartBalance = 0;
 bool DailyLimitHit = false;
 
-// Hardcoded profit target
-double TakeProfit_Dollars = 12.03;
-
 //=== INDICATOR HANDLES ===
 int hEMA_Fast_M5, hEMA_Slow_M5;
 int hEMA_Fast_M15, hEMA_Slow_M15;
 int hRSI_M5;
 int hATR_M5;
 int hMA20_H1, hMA50_H1, hRSI_H1;
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
    trade.SetExpertMagicNumber(MagicNumber);
    
+   // M5 indicators
    hEMA_Fast_M5 = iMA(_Symbol, PERIOD_M5, EMA_Fast_Period, 0, MODE_EMA, PRICE_CLOSE);
    hEMA_Slow_M5 = iMA(_Symbol, PERIOD_M5, EMA_Slow_Period, 0, MODE_EMA, PRICE_CLOSE);
    hRSI_M5 = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE);
    hATR_M5 = iATR(_Symbol, PERIOD_M5, 14);
    
+   // M15 indicators (multi-timeframe)
    hEMA_Fast_M15 = iMA(_Symbol, PERIOD_M15, EMA_Fast_Period, 0, MODE_EMA, PRICE_CLOSE);
    hEMA_Slow_M15 = iMA(_Symbol, PERIOD_M15, EMA_Slow_Period, 0, MODE_EMA, PRICE_CLOSE);
    
+   // H1 indicators (AI + MTF)
    hMA20_H1 = iMA(_Symbol, PERIOD_H1, 20, 0, MODE_SMA, PRICE_CLOSE);
    hMA50_H1 = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_SMA, PRICE_CLOSE);
    hRSI_H1  = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE);
@@ -127,13 +124,18 @@ int OnInit()
    if(hEMA_Fast_M5 == INVALID_HANDLE || hEMA_Slow_M5 == INVALID_HANDLE ||
       hRSI_M5 == INVALID_HANDLE || hATR_M5 == INVALID_HANDLE ||
       hEMA_Fast_M15 == INVALID_HANDLE || hEMA_Slow_M15 == INVALID_HANDLE)
+   {
+      Print("[ERROR] Indicator creation failed.");
       return(INIT_FAILED);
+   }
    
-   Print("[INIT] M5 Candle Scalper v4 (Optimized Entry)");
-   Print("[INIT] SL=" + DoubleToString(ATR_SL_Mult, 2) + "xATR | TP=" + DoubleToString(ATR_TP_Mult, 2) + "xATR");
-   Print("[INIT] Trail start=" + IntegerToString(Trail_StartPoints) + "pts | Step=" + IntegerToString(Trail_StepPoints) + "pts");
+   Print("[INIT] M5 Candle Scalper v2 (Confirm-Then-Enter)");
+   Print("[INIT] Confirm wait=", ConfirmWaitBars, " M1 bars | MTF=", UseMTF_Filter, " | AI=", UseAI_Bias);
    
    DailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(UseRiskSizing) Print("[INIT] Risk sizing ON: ", RiskPercent, "% per trade");
+   if(UseDailyLimits) Print("[INIT] Daily limits: +$", DailyProfitTarget, " / -$", DailyLossLimit);
+   
    return(INIT_SUCCEEDED);
 }
 
@@ -155,6 +157,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // Daily reset
    MqlDateTime dt;
    TimeLocal(dt);
    if(dt.day != LastTradeDay)
@@ -167,9 +170,11 @@ void OnTick()
       DailyLimitHit = false;
    }
    
-   // Daily limits disabled - trades continue all day
-   // if(UseDailyLimits && CheckDailyLimits()) return;
+   // === #6 DAILY LIMITS (DISABLED - trades continue all day) ===
+   // if(UseDailyLimits && CheckDailyLimits())
+   //    return;
    
+   // Update AI
    if(UseAI_Bias)
    {
       datetime now = TimeCurrent();
@@ -177,24 +182,31 @@ void OnTick()
       { UpdateAIBias(); LastAIRequest = now; }
    }
    
+   // Check profit target on open position (every tick)
    if(HasPosition())
    {
       CheckProfitTarget();
+      // === #4 TRAILING STOP ===
       if(UseTrailingStop) ManageTrailing();
    }
    
+   // Detect new M5 candle
    datetime currentM5 = iTime(_Symbol, PERIOD_M5, 0);
    if(currentM5 != LastM5CandleTime)
    {
-      if(HasPosition()) HandleCandleEndClose();
+      // === CLOSE previous candle's trade (unless holding a winner) ===
+      if(HasPosition())
+         HandleCandleEndClose();
       
+      // === RESET for new candle ===
       LastM5CandleTime = currentM5;
-      TradeOpenThisCandle = HasPosition();
+      TradeOpenThisCandle = HasPosition();  // If we held a winner, don't open another
       DirectionDecided = false;
       CandleDirection = "NONE";
       M1BarsElapsed = 0;
       LastM1Time = 0;
       
+      // === DECIDE DIRECTION (but don't enter yet) ===
       if(!HasPosition())
       {
          CandleDirection = DecideDirection();
@@ -204,6 +216,7 @@ void OnTick()
       }
    }
    
+   // === WAIT FOR M1 CONFIRMATION THEN ENTER ===
    if(DirectionDecided && !TradeOpenThisCandle && !HasPosition() && CandleDirection != "SKIP")
    {
       CheckM1Confirmation();
@@ -211,14 +224,18 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
+// DECIDE DIRECTION AT M5 CANDLE OPEN (Step 1)
+//+------------------------------------------------------------------+
 string DecideDirection()
 {
+   // === ATR CHECK ===
    double atr[];
    ArraySetAsSeries(atr, true);
    CopyBuffer(hATR_M5, 0, 0, 1, atr);
    if(atr[0] / _Point < MinATR_Points)
       return "SKIP";
    
+   // === M5 MOMENTUM (previous candles) ===
    MqlRates m5[];
    ArraySetAsSeries(m5, true);
    CopyRates(_Symbol, PERIOD_M5, 1, MomentumCandles, m5);
@@ -236,6 +253,7 @@ string DecideDirection()
    if(totalBody / MomentumCandles < MinAvgBody_Points)
       return "SKIP";
    
+   // === M5 EMA DIRECTION ===
    double emaF5[], emaS5[];
    ArraySetAsSeries(emaF5, true);
    ArraySetAsSeries(emaS5, true);
@@ -245,15 +263,18 @@ string DecideDirection()
    bool m5_bullish = (emaF5[0] > emaS5[0]);
    bool m5_bearish = (emaF5[0] < emaS5[0]);
    
+   // === M5 RSI ===
    double rsi5[];
    ArraySetAsSeries(rsi5, true);
    CopyBuffer(hRSI_M5, 0, 0, 2, rsi5);
    
+   // === MULTI-TIMEFRAME FILTER ===
    bool m15_bullish = true, m15_bearish = true;
    bool h1_bullish = true, h1_bearish = true;
    
    if(UseMTF_Filter)
    {
+      // M15 EMA alignment
       double emaF15[], emaS15[];
       ArraySetAsSeries(emaF15, true);
       ArraySetAsSeries(emaS15, true);
@@ -262,6 +283,7 @@ string DecideDirection()
       m15_bullish = (emaF15[0] > emaS15[0]);
       m15_bearish = (emaF15[0] < emaS15[0]);
       
+      // H1 MA alignment
       double ma20[], ma50[];
       ArraySetAsSeries(ma20, true);
       ArraySetAsSeries(ma50, true);
@@ -271,10 +293,12 @@ string DecideDirection()
       h1_bearish = (ma20[0] < ma50[0]);
    }
    
+   // === FINAL DIRECTION DECISION ===
    string direction = "SKIP";
    
    if(UseMTF_Scoring)
    {
+      // === #5 MTF SCORING - count agreeing timeframes ===
       int buyScore = 0, sellScore = 0;
       if(m5_bullish) buyScore++;   else if(m5_bearish) sellScore++;
       if(m15_bullish) buyScore++;  else if(m15_bearish) sellScore++;
@@ -287,12 +311,14 @@ string DecideDirection()
    }
    else
    {
+      // Strict: all timeframes must agree
       if(bullish >= 2 && m5_bullish && rsi5[0] > RSI_BuyAbove && m15_bullish && h1_bullish)
          direction = "BUY";
       else if(bearish >= 2 && m5_bearish && rsi5[0] < RSI_SellBelow && m15_bearish && h1_bearish)
          direction = "SELL";
    }
    
+   // === AI FILTER ===
    if(UseAI_Bias && AI_Bias != "NONE" && direction != "SKIP")
    {
       if(direction == "BUY" && AI_Bias == "SELL") return "SKIP";
@@ -303,8 +329,11 @@ string DecideDirection()
 }
 
 //+------------------------------------------------------------------+
+// WAIT FOR M1 CONFIRMATION BEFORE ENTRY (Step 2)
+//+------------------------------------------------------------------+
 void CheckM1Confirmation()
 {
+   // Track M1 bars elapsed since M5 candle opened
    datetime currentM1 = iTime(_Symbol, PERIOD_M1, 0);
    if(currentM1 != LastM1Time)
    {
@@ -312,97 +341,97 @@ void CheckM1Confirmation()
       M1BarsElapsed++;
    }
    
+   // Wait for at least ConfirmWaitBars M1 candles to complete
    if(M1BarsElapsed < ConfirmWaitBars)
       return;
    
+   // Too late in the candle (already 3+ M1 bars = only 2 min left) - skip
    if(M1BarsElapsed > 3)
    {
       CandleDirection = "SKIP";
-      Print("[SKIP] Too late in candle. M1 bars: ", M1BarsElapsed);
+      Print("[SKIP] Too late in candle for confirmation. M1 bars elapsed: ", M1BarsElapsed);
       return;
    }
    
+   // === CHECK THE LAST COMPLETED M1 CANDLE ===
    MqlRates m1[];
    ArraySetAsSeries(m1, true);
-   CopyRates(_Symbol, PERIOD_M1, 1, 1, m1);
+   CopyRates(_Symbol, PERIOD_M1, 1, 1, m1);  // Last completed M1 bar
    
    double m1Body = (m1[0].close - m1[0].open) / _Point;
    double m1AbsBody = MathAbs(m1Body);
    bool m1Bullish = (m1[0].close > m1[0].open);
    bool m1Bearish = (m1[0].close < m1[0].open);
    
+   // M1 candle must have minimum body size
    if(m1AbsBody < MinM1ConfirmBody)
-      return;
+      return;  // Wait for next M1 bar (might still confirm)
    
+   // Get M5 candle open price for break check
    double m5Open = iOpen(_Symbol, PERIOD_M5, 0);
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    
+   // === CONFIRM BUY ===
    if(CandleDirection == "BUY")
    {
+      // M1 must be bullish
       if(!m1Bullish) return;
+      
+      // Price must have broken above M5 open (confirms upward momentum)
       if(RequireM1BreakHigh && currentBid <= m5Open) return;
       
-      Print("[CONFIRMED] BUY after ", M1BarsElapsed, " M1 bars");
+      // All confirmed - ENTER BUY
+      Print("[CONFIRMED] BUY after ", M1BarsElapsed, " M1 bars. M1 body=", DoubleToString(m1AbsBody, 0),
+            "pts. Price broke above M5 open (", DoubleToString(m5Open, _Digits), ")");
       ExecuteBuy();
    }
    
+   // === CONFIRM SELL ===
    if(CandleDirection == "SELL")
    {
+      // M1 must be bearish
       if(!m1Bearish) return;
+      
+      // Price must have broken below M5 open (confirms downward momentum)
       if(RequireM1BreakLow && currentAsk >= m5Open) return;
       
-      Print("[CONFIRMED] SELL after ", M1BarsElapsed, " M1 bars");
+      // All confirmed - ENTER SELL
+      Print("[CONFIRMED] SELL after ", M1BarsElapsed, " M1 bars. M1 body=", DoubleToString(m1AbsBody, 0),
+            "pts. Price broke below M5 open (", DoubleToString(m5Open, _Digits), ")");
       ExecuteSell();
    }
 }
 
 //+------------------------------------------------------------------+
-void GetDynamicSLTP(double &sl_dist, double &tp_dist)
-{
-   double atr = GetATR();
-   double atrPoints = atr / _Point;
-   
-   double sl_pts = atrPoints * ATR_SL_Mult;
-   double tp_pts = atrPoints * ATR_TP_Mult;
-   
-   if(sl_pts < 20) sl_pts = 20;
-   if(tp_pts < Min_TP_Points) tp_pts = Min_TP_Points;
-   if(tp_pts > Max_TP_Points) tp_pts = Max_TP_Points;
-   
-   if(tp_pts / sl_pts < Min_RR_Ratio)
-      tp_pts = sl_pts * Min_RR_Ratio;
-   
-   sl_dist = sl_pts * _Point;
-   tp_dist = tp_pts * _Point;
-   
-   Print("[SLTP] ATR=", DoubleToString(atrPoints,1), "pts | SL=", DoubleToString(sl_pts,0), 
-         "pts | TP=", DoubleToString(tp_pts,0), "pts | RR=", DoubleToString(tp_pts/sl_pts,2));
-}
-
-//+------------------------------------------------------------------+
-void GetSLTP(double &sl_dist, double &tp_dist)
-{
-   if(UseDynamic_SLTP)
-      GetDynamicSLTP(sl_dist, tp_dist);
-   else
-   {
-      double atr = GetATR();
-      sl_dist = atr * ATR_SL_Mult;
-      tp_dist = atr * ATR_TP_Mult;
-   }
-}
-
+// ATR & SIZING HELPERS
 //+------------------------------------------------------------------+
 double GetATR()
 {
    double atr[];
    ArraySetAsSeries(atr, true);
-   if(CopyBuffer(hATR_M5, 0, 0, 1, atr) <= 0) return 30 * _Point;
+   if(CopyBuffer(hATR_M5, 0, 0, 1, atr) <= 0) return 100 * _Point;
    return atr[0];
 }
 
-//+------------------------------------------------------------------+
+//--------------------------------------------------
+void GetSLTP(double &sl_dist, double &tp_dist)
+{
+   if(UseATR_SLTP)
+   {
+      double atr = GetATR();
+      sl_dist = atr * ATR_SL_Mult;
+      tp_dist = atr * ATR_TP_Mult;
+      if(tp_dist < sl_dist * 1.3) tp_dist = sl_dist * 1.3;
+   }
+   else
+   {
+      sl_dist = Fallback_SL_Points * _Point;
+      tp_dist = sl_dist * 1.5;
+   }
+}
+
+//--------------------------------------------------
 double CalcLot(double sl_dist)
 {
    if(!UseRiskSizing) return LotSize;
@@ -425,6 +454,8 @@ double CalcLot(double sl_dist)
 }
 
 //+------------------------------------------------------------------+
+// TRADE EXECUTION
+//+------------------------------------------------------------------+
 void ExecuteBuy()
 {
    double sl_dist, tp_dist;
@@ -435,13 +466,15 @@ void ExecuteBuy()
    double sl = NormalizeDouble(ask - sl_dist, _Digits);
    double tp = NormalizeDouble(ask + tp_dist, _Digits);
 
-   if(!trade.Buy(lot, _Symbol, ask, sl, tp, "M5v4 BUY"))
+   if(!trade.Buy(lot, _Symbol, ask, sl, tp, "M5v2 BUY"))
+   {
       Print("[ERROR] BUY failed: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+   }
    else
    {
       TradeOpenThisCandle = true;
       TodayTrades++;
-      Print("[ENTRY] BUY ", lot, " lots | SL:", sl, " TP:", tp);
+      Print("[ENTRY] BUY ", lot, " lots @ ", ask, " SL:", sl, " TP:", tp);
    }
 }
 
@@ -456,16 +489,20 @@ void ExecuteSell()
    double sl = NormalizeDouble(bid + sl_dist, _Digits);
    double tp = NormalizeDouble(bid - tp_dist, _Digits);
 
-   if(!trade.Sell(lot, _Symbol, bid, sl, tp, "M5v4 SELL"))
+   if(!trade.Sell(lot, _Symbol, bid, sl, tp, "M5v2 SELL"))
+   {
       Print("[ERROR] SELL failed: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+   }
    else
    {
       TradeOpenThisCandle = true;
       TodayTrades++;
-      Print("[ENTRY] SELL ", lot, " lots | SL:", sl, " TP:", tp);
+      Print("[ENTRY] SELL ", lot, " lots @ ", bid, " SL:", sl, " TP:", tp);
    }
 }
 
+//+------------------------------------------------------------------+
+// EXIT LOGIC
 //+------------------------------------------------------------------+
 void CheckProfitTarget()
 {
@@ -475,35 +512,19 @@ void CheckProfitTarget()
       if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
       
       double profit = PositionGetDouble(POSITION_PROFIT);
-      double priceOpen = PositionGetDouble(POSITION_PRICE_OPEN);
-      double priceCurrent = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 
-                           SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double profitPoints = (priceCurrent - priceOpen) / _Point;
-      
       if(profit >= TakeProfit_Dollars)
       {
          ulong ticket = PositionGetInteger(POSITION_TICKET);
          trade.PositionClose(ticket);
          TodayWins++;
          TradeOpenThisCandle = false;
-         Print("[TP HIT] +$", DoubleToString(profit, 2), " | Points: ", IntegerToString((int)profitPoints));
-         continue;
-      }
-      
-      double atr = GetATR() / _Point;
-      double dynamicTP = atr * 2.0;
-      
-      if(profitPoints >= dynamicTP)
-      {
-         ulong ticket = PositionGetInteger(POSITION_TICKET);
-         trade.PositionClose(ticket);
-         TodayWins++;
-         TradeOpenThisCandle = false;
-         Print("[DYNAMIC TP] Profit: ", IntegerToString((int)profitPoints), "pts | Closed at optimal level");
+         Print("[TP HIT] +$", DoubleToString(profit, 2));
       }
    }
 }
 
+//+------------------------------------------------------------------+
+// #3 CANDLE END - HOLD WINNERS, CLOSE LOSERS/FLAT
 //+------------------------------------------------------------------+
 void HandleCandleEndClose()
 {
@@ -521,28 +542,28 @@ void HandleCandleEndClose()
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double profitPts = (type == POSITION_TYPE_BUY) ? (bid - openPrice)/_Point : (openPrice - ask)/_Point;
       
+      // === HOLD WINNERS: keep profitable trending trades open ===
       if(HoldWinnersPastCandle && profitPts >= HoldMinProfitPoints)
       {
-         Print("[HOLD] Winner running (+", IntegerToString((int)profitPts), "pts). Trail buffer: ", 
-               IntegerToString((int)HoldTrailBuffer), "pts");
-         continue;
+         Print("[HOLD] Winner running (+", DoubleToString(profitPts,0), "pts). Keeping open past candle. Trail will manage exit.");
+         continue;  // Don't close - let trailing stop handle it
       }
       
-      if(profit >= -1.00)
-      {
-         trade.PositionClose(ticket);
-         if(profit > 0) TodayWins++; else TodayLosses++;
-         Print("[CANDLE END] ", (profit>0 ? "WIN +$" : "LOSS $"), DoubleToString(profit, 2));
-      }
+      // Otherwise close at candle end
+      trade.PositionClose(ticket);
+      if(profit > 0) TodayWins++;
+      else TodayLosses++;
+      Print("[CANDLE END] ", (profit>0 ? "WIN +$" : "LOSS $"), DoubleToString(profit, 2));
    }
 }
 
+//+------------------------------------------------------------------+
+// #4 TRAILING STOP
 //+------------------------------------------------------------------+
 void ManageTrailing()
 {
    double atr = GetATR();
    double trailDist = atr * Trail_ATR_Mult;
-   double trailStep = Trail_StepPoints * _Point;
    
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -563,10 +584,10 @@ void ManageTrailing()
          if(profitPts >= Trail_StartPoints)
          {
             double newSL = NormalizeDouble(bid - trailDist, _Digits);
-            if(newSL > curSL + trailStep)
+            if(newSL > curSL)
             {
                trade.PositionModify(ticket, newSL, curTP);
-               Print("[TRAIL] BUY SL -> ", newSL, " | Profit: ", IntegerToString((int)profitPts), "pts");
+               Print("[TRAIL] BUY SL -> ", newSL);
             }
          }
       }
@@ -576,16 +597,18 @@ void ManageTrailing()
          if(profitPts >= Trail_StartPoints)
          {
             double newSL = NormalizeDouble(ask + trailDist, _Digits);
-            if(newSL < curSL - trailStep || curSL == 0)
+            if(newSL < curSL || curSL == 0)
             {
                trade.PositionModify(ticket, newSL, curTP);
-               Print("[TRAIL] SELL SL -> ", newSL, " | Profit: ", IntegerToString((int)profitPts), "pts");
+               Print("[TRAIL] SELL SL -> ", newSL);
             }
          }
       }
    }
 }
 
+//+------------------------------------------------------------------+
+// #6 DAILY LIMITS
 //+------------------------------------------------------------------+
 bool CheckDailyLimits()
 {
@@ -596,7 +619,7 @@ bool CheckDailyLimits()
    {
       if(!DailyLimitHit)
       {
-         Print("[DAILY LIMIT] Profit target reached. Stopping.");
+         Print("[DAILY LIMIT] Profit target +$", DoubleToString(dailyPL,2), " reached. Stopping.");
          CloseAllPositions();
          DailyLimitHit = true;
       }
@@ -606,7 +629,7 @@ bool CheckDailyLimits()
    {
       if(!DailyLimitHit)
       {
-         Print("[DAILY LIMIT] Loss limit reached. Stopping.");
+         Print("[DAILY LIMIT] Loss limit -$", DoubleToString(MathAbs(dailyPL),2), " reached. Stopping.");
          CloseAllPositions();
          DailyLimitHit = true;
       }
@@ -625,6 +648,8 @@ void CloseAllPositions()
 }
 
 //+------------------------------------------------------------------+
+// POSITION HELPER
+//+------------------------------------------------------------------+
 bool HasPosition()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -634,6 +659,8 @@ bool HasPosition()
    return false;
 }
 
+//+------------------------------------------------------------------+
+// AI BIAS
 //+------------------------------------------------------------------+
 void UpdateAIBias()
 {
@@ -677,9 +704,11 @@ void UpdateAIBias()
    if(conf >= AI_ConfidenceThreshold)
    { AI_Bias = sig; AI_Confidence = conf; Print("[AI] ", AI_Bias, " (", conf, ")"); }
    else
-   { AI_Bias = "NONE"; Print("[AI] Low confidence. No filter."); }
+   { AI_Bias = "NONE"; Print("[AI] Low confidence (", conf, "). No filter."); }
 }
 
+//+------------------------------------------------------------------+
+// OPENAI API
 //+------------------------------------------------------------------+
 string OpenAIRequest(string prompt)
 {
@@ -689,9 +718,9 @@ string OpenAIRequest(string prompt)
    string sys = "You are a XAUUSD M5 scalping bias analyst.\\n"
       "Rules: Reply SIGNAL CONFIDENCE (e.g. BUY 78). One line. No explanation.";
 
-   string body = "{\"model\":\"" + OpenAI_Model + "\"," +
-                 "\"messages\":[{\"role\":\"system\",\"content\":\"" + sys + "\"}," +
-                 "{\"role\":\"user\",\"content\":\"" + prompt + "\"}]," +
+   string body = "{\"model\":\"" + OpenAI_Model + "\","
+                 "\"messages\":[{\"role\":\"system\",\"content\":\"" + sys + "\"},"
+                 "{\"role\":\"user\",\"content\":\"" + prompt + "\"}],"
                  "\"max_tokens\":10,\"temperature\":0.0}";
 
    char post[];

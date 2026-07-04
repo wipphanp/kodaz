@@ -1,0 +1,56 @@
+//--- Kalman state
+struct Kalman2 {
+  double alpha;        // intercept
+  double beta;         // slope
+  double P00, P01, P10, P11; // covariance matrix
+};
+
+//--- Initialize Kalman
+void KalmanInit(Kalman2 &K, double init_alpha=0.0, double init_beta=1.0) {
+  K.alpha = init_alpha;
+  K.beta  = init_beta;
+  K.P00 = 1.0; K.P01 = 0.0;
+  K.P10 = 0.0; K.P11 = 1.0;
+}
+
+//--- Kalman update: observation pB = alpha + beta * pA + noise
+// Q_alpha small fixed; Q_beta tunable; R_obs tunable
+void KalmanUpdate(Kalman2 &K, double pA, double pB, double Q_alpha, double Q_beta, double R_obs) {
+  // Predict covariance: P = P + Q
+  K.P00 += Q_alpha;
+  K.P11 += Q_beta;
+
+  // Observation matrix H = [1, pA]
+  double H0 = 1.0, H1 = pA;
+
+  // Predicted observation
+  double yhat = K.alpha * H0 + K.beta * H1;
+  double innov = pB - yhat;
+
+  // Innovation covariance S = H * P * H' + R
+  double S = H0*(K.P00*H0 + K.P01*H1) + H1*(K.P10*H0 + K.P11*H1) + R_obs;
+  if(S <= 1e-12) S = 1e-12;
+
+  // Kalman gain Kgain = P * H' / S
+  double Kg0 = (K.P00*H0 + K.P01*H1) / S;
+  double Kg1 = (K.P10*H0 + K.P11*H1) / S;
+
+  // State update
+  K.alpha += Kg0 * innov;
+  K.beta  += Kg1 * innov;
+
+  // Covariance update: P = (I - Kgain*H) * P
+  double P00 = K.P00, P01 = K.P01, P10 = K.P10, P11 = K.P11;
+  K.P00 = (1.0 - Kg0*H0)*P00 - Kg0*H1*P10;
+  K.P01 = (1.0 - Kg0*H0)*P01 - Kg0*H1*P11;
+  K.P10 = -Kg1*H0*P00 + (1.0 - Kg1*H1)*P10;
+  K.P11 = -Kg1*H0*P01 + (1.0 - Kg1*H1)*P11;
+
+  // Symmetrize small numerical asymmetry
+  K.P01 = K.P10 = 0.5*(K.P01 + K.P10);
+}
+
+
+Typical defaults: Q_alpha = 1e-8, Q_beta = 1e-5, R_obs = 1e-2. Tune via optimizer.
+
+Call KalmanUpdate every tick with mid prices. Use K.beta and K.alpha to compute spread: s = pB - (K.beta * pA + K.alpha).

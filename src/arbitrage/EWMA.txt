@@ -1,0 +1,41 @@
+//--- EWMA helpers
+double EWMA_Gain(int dt_seconds, int half_life_seconds) {
+  if(half_life_seconds <= 0) return 1.0;
+  double tau = (double)half_life_seconds;
+  return 1.0 - MathExp(-(double)dt_seconds / tau);
+}
+
+//--- EWMA state
+struct EWMAState {
+  double mu;
+  double var;
+  datetime last_update;
+  bool init;
+};
+
+//--- Initialize
+void EWMAInit(EWMAState &E, double init_mu=0.0, double init_var=1.0) {
+  E.mu = init_mu;
+  E.var = init_var;
+  E.last_update = TimeCurrent();
+  E.init = true;
+}
+
+//--- Update with new spread s and elapsed seconds dt
+void EWMUpdate(EWMAState &E, double s, int dt_seconds, int half_life_mu, int half_life_sigma) {
+  if(!E.init) { EWMAInit(E, s, 1.0); E.last_update = TimeCurrent(); return; }
+  if(dt_seconds <= 0) dt_seconds = 1;
+  double k_mu = EWMA_Gain(dt_seconds, half_life_mu);
+  double k_var = EWMA_Gain(dt_seconds, half_life_sigma);
+  double delta = s - E.mu;
+  E.mu += k_mu * delta;
+  E.var += k_var * (delta*delta - E.var);
+  if(E.var < 1e-10) E.var = 1e-10;
+  E.last_update = TimeCurrent();
+}
+
+//--- Compute z-score
+double EWMA_z(EWMAState &E, double s) {
+  double sigma = MathSqrt(E.var);
+  return (s - E.mu) / (sigma + 1e-12);
+}

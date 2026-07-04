@@ -1,16 +1,17 @@
 ﻿//+------------------------------------------------------------------+
-//|                                        ea_5minCandle_scalp_v4.mq5 |
+//|                                        ea_5minCandle_scalp_v3.mq5 |
 //|                                  Copyright 2025, MetaQuotes Ltd. |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.00"
+#property version   "2.00"
 
 //+------------------------------------------------------------------+
-//| M5 Candle Scalper v4 — Optimized Entry Filters                   |
-//| Lower entry thresholds for more trades on both sides             |
-//| Same optimized exit logic as v3                                  |
+//| M5 Candle Scalper v3 — Optimized Exit Logic                      |
+//| Dynamic SL/TP based on volatility + ATR-based trailing           |
+//| Profit targets adjusted to catch more winners                    |
+//| Loss prevention via dynamic stop management                      |
 //+------------------------------------------------------------------+
 
 #include <Trade/Trade.mqh>
@@ -24,21 +25,21 @@ input long MagicNumber = 20260607;
 
 //=== DYNAMIC SL/TP OPTIMIZATION (NEW v3) ===
 input bool UseDynamic_SLTP = true;        // Use dynamic ATR-based SL/TP with volatility adjustment
-input double ATR_SL_Mult = 1.2;           // REDUCED from 1.5 - tighter stop, less loss per trade
-input double ATR_TP_Mult = 3.0;           // INCREASED from 2.5 - better reward ratio
+input double ATR_SL_Mult = 1.2;           // Reduced from 1.5 - tighter stop
+input double ATR_TP_Mult = 3.0;           // Increased from 2.5 - better reward ratio
 input double Min_RR_Ratio = 1.5;          // Minimum Risk-Reward ratio required
 input double Max_TP_Points = 150;         // Cap TP at this many points (avoid too high)
 input double Min_TP_Points = 40;          // Minimum TP to ensure worthwhile trades
 
 //=== #3 HOLD WINNERS PAST CANDLE (IMPROVED) ===
 input bool HoldWinnersPastCandle = true;
-input double HoldMinProfitPoints = 20;    // REDUCED from 30 - catch smaller trends
+input double HoldMinProfitPoints = 20;    // Reduced from 30 - catch smaller trends
 input double HoldTrailBuffer = 10;        // Keep trail buffer this far behind price
 
 //=== #4 TRAILING STOP (OPTIMIZED) ===
 input bool UseTrailingStop = true;
-input double Trail_ATR_Mult = 0.8;        // REDUCED from 1.0 - tighter trail
-input int Trail_StartPoints = 25;         // REDUCED from 40 - trail earlier
+input double Trail_ATR_Mult = 0.8;        // Reduced from 1.0 - tighter trail
+input int Trail_StartPoints = 25;         // Reduced from 40 - trail earlier
 input int Trail_StepPoints = 15;          // Move SL by this much when trailing
 
 //=== #5 MTF SCORING ===
@@ -69,10 +70,10 @@ input int EMA_Slow_Period = 21;
 
 //=== MOMENTUM & FILTERS ===
 input int MomentumCandles = 3;
-input double MinAvgBody_Points = 10.0;    // REDUCED from 15.0 - catch more setups
-input double MinATR_Points = 15.0;        // REDUCED from 25.0 - more entry opportunities
-input double RSI_BuyAbove = 51.0;         // REDUCED from 52.0 - more BUY opportunities
-input double RSI_SellBelow = 47.0;        // REDUCED from 48.0 - more SELL opportunities
+input double MinAvgBody_Points = 15.0;    // Reduced to catch more setups
+input double MinATR_Points = 25.0;        // Reduced for more opportunities
+input double RSI_BuyAbove = 52.0;
+input double RSI_SellBelow = 48.0;
 
 //=== AI BIAS ===
 input bool UseAI_Bias = true;
@@ -107,6 +108,7 @@ int hEMA_Fast_M15, hEMA_Slow_M15;
 int hRSI_M5;
 int hATR_M5;
 int hMA20_H1, hMA50_H1, hRSI_H1;
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -129,7 +131,7 @@ int OnInit()
       hEMA_Fast_M15 == INVALID_HANDLE || hEMA_Slow_M15 == INVALID_HANDLE)
       return(INIT_FAILED);
    
-   Print("[INIT] M5 Candle Scalper v4 (Optimized Entry)");
+   Print("[INIT] M5 Candle Scalper v3 (Optimized Exit)");
    Print("[INIT] SL=" + DoubleToString(ATR_SL_Mult, 2) + "xATR | TP=" + DoubleToString(ATR_TP_Mult, 2) + "xATR");
    Print("[INIT] Trail start=" + IntegerToString(Trail_StartPoints) + "pts | Step=" + IntegerToString(Trail_StepPoints) + "pts");
    
@@ -435,7 +437,7 @@ void ExecuteBuy()
    double sl = NormalizeDouble(ask - sl_dist, _Digits);
    double tp = NormalizeDouble(ask + tp_dist, _Digits);
 
-   if(!trade.Buy(lot, _Symbol, ask, sl, tp, "M5v4 BUY"))
+   if(!trade.Buy(lot, _Symbol, ask, sl, tp, "M5v3 BUY"))
       Print("[ERROR] BUY failed: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
    else
    {
@@ -456,7 +458,7 @@ void ExecuteSell()
    double sl = NormalizeDouble(bid + sl_dist, _Digits);
    double tp = NormalizeDouble(bid - tp_dist, _Digits);
 
-   if(!trade.Sell(lot, _Symbol, bid, sl, tp, "M5v4 SELL"))
+   if(!trade.Sell(lot, _Symbol, bid, sl, tp, "M5v3 SELL"))
       Print("[ERROR] SELL failed: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
    else
    {

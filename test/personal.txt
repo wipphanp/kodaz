@@ -1,0 +1,305 @@
+
+C:\Users\DELL\AppData\Roaming\MetaQuotes\Terminal\D0E8209F77C8CF37AD8BF550E51FF075\MQL5\Experts
+
+https://mygtcportal.com/getview?view=register&token=A5prmowwnowwwwww
+
+https://mygtcportal.com/getview?view=register&token=A5prmowwnowwwwww
+
+
+Factroy.ai: https://styles.refero.design/style/13d6fc89-eba2-4724-ac37-20f4f2e5efec
+https://github.com/obra/superpowers
+
+Antigravity: wipphanp@gmail.com
+Kiro: wipphanp@gmail.com
+
+MongoDB: wipphanp@gmail.com
+wipphanp_db_user dCDEYyIE3SjYYSvl
+
+ngrok:wipphanp@gmail.com
+
+ngrok config add-authtoken 33dpg02lLwCLWIUlMvdEGTv6OzV_44eXfXx9r3aMq3U2poPSf
+
+
+trae:pruthviraj.phanendrakumar@gmail
+claude:pruthviraj.phanendrakumar@gmail
+
+devin.ai:pruthvirajphanendrakumar@gmail.com
+https://app.devin.ai/org/pruthviraj-phanendrakumar/settings
+
+twilio - wipphanp@outlook.com
+
+twilio - anuragugargol@gmail.com
+Anurag@1095
+
+vapi: wipphanp@gmail.com
+https://github.com/wipphanp
+
+vercel: wipphanp@gmail.com
+Gamma : pruthvirajsp@gmail.com
+
+Account SID: ACe57433dbc52f7a62dc2b8811c5d62887
+Auth Token : fabdcf0be0ef056169a8ede9685ef029
+Twilio Phone Number : +19895202449
+
+Deepgram : 7c3215685de6d0caa7b6a97ec1e4f613fda71486
+CARTESIA_API_KEY=sk_car_7BjUcd36LyteLMJn3RD1Sf
+
+Fix: Switched the remote URL from HTTPS to SSH — your SSH key (Hi wipphanp!) was already configured and working, 
+so no credential prompts needeed
+
+Jagadish card
+
+4622695263993864 
+10/29 840
+
+5546370231964815
+04/30 621
+
+Pruthvi ICICI : 5241 9357 0330 0009
+
+Livekit : https://cloud.livekit.io
+wipphanp@gmail.com
+
+LIVEKIT_URL=wss://realestatevoiceagent-soq18wn3.livekit.cloud
+LIVEKIT_API_KEY=APIpaXzdTBaeDsi
+LIVEKIT_API_SECRET=gGxnwpNYOM4OXvHEzOeBADkEFKE3zV0r2OmhOhIxWoT
+
+Twilio Trunk SID : TKd90b26c5a4988831ccbe6f7d6ead8898
+
+Sarvam:
+https://www.sarvam.ai 
+APIKey:sk_7elx4hx8_3CO0AE5iozLAnsjAYRa5jAmx (wipphanp)
+
+APIKey:sk_k2fuvjk6_VKG74rldhQIjEyDo3u00DRae
+
+Deepgram:
+https://console.deepgram.com/project/81e07482-e3b4-4843-8373-c178a18f9416
+wipphanp@gmail.com
+d1644279f9777cb494fdc27261189fdcd9c15cff
+
+OpenAI
+https://platform.openai.com/settings/organization/people/members
+pruthviraj.phanendrakumar
+
+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
+
+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
+
+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
+
+===================================================================================================================================================================================
+
+
+
+https://client.paradiseglobalfx.com/?tab=register&ref=06PR1M4H
+
+D:\myOnedrive\OneDrive\Desktop\personal.txt
+9845364490
+=====================================================================================================================================================
+ngrok config add-authtoken:33dpg02lLwCLWIUlMvdEGTv6OzV_44eXfXx9r3aMq3U2poPSf
+
+https://console.twilio.com/?frameUrl=%2Fconsole%3Fx-target-region%3Dus1
+
+**To create a GitHub Personal Access Token (PAT), you need to go into your GitHub account settings, navigate to Developer Settings → Personal Access Tokens, and generate a new token with the required scopes. GitHub now recommends using *fine-grained tokens* for better security and control.**  
+
+---
+
+=======================================================================================================================================================
+
+## 🔑 Step-by-Step Guide
+
+### 1. Navigate to Settings
+- Log in to your GitHub account.
+- Click your **profile picture** (top-right corner).
+- Select **Settings**.
+
+### 2. Developer Settings
+- Scroll down and click **Developer settings**.
+- In the left sidebar, select **Personal access tokens**.
+
+### 3. Choose Token Type
+- GitHub offers two types:
+  - **Fine-grained tokens (recommended)**: Scoped to specific repositories/orgs, more secure.
+  - **Classic tokens**: Broader access, but less secure. Use only if fine-grained doesn’t meet your needs.
+
+### 4. Generate New Token
+- Click **Generate new token**.
+- Provide:
+  - **Note** (description of usage, e.g., "CI/CD pipeline").
+  - **Expiration date** (e.g., 30 days, 90 days, or custom).
+  - **Scopes/permissions** (e.g., `repo`, `workflow`, `admin:org` depending on your use case).
+
+### 5. Copy and Store Securely
+- Click **Generate token**.
+- **Copy the token immediately**—you won’t be able to view it again.
+- Store it in a secure place (e.g., password manager, environment variable).
+
+---
+
+## ⚙️ Using the Token
+
+- **Git operations (CLI):**
+  ```bash
+  git clone https://github.com/username/repo.git
+  ```
+  When prompted for a password, paste the PAT instead.
+
+- **API requests:**
+  ```bash
+  curl -H "Authorization: token YOUR_TOKEN" https://api.github.com/user
+  ```
+
+- **Environment variables (recommended):**
+  ```bash
+  export GITHUB_TOKEN=your_token_here
+  ```
+
+---
+
+## 📊 Comparison of Token Types
+
+| Feature                  | Fine-Grained Token | Classic Token |
+|---------------------------|--------------------|---------------|
+| Scope control             | Repository/org specific | Broad (all repos) |
+| Security                  | Higher (least privilege) | Lower |
+| Recommended by GitHub     | ✅ Yes | ❌ Only if necessary |
+| Expiration options        | Flexible | Flexible |
+| Use cases                 | CI/CD, automation, limited repo access | Legacy tools, broad API access |
+
+---
+
+## ⚠️ Risks & Best Practices
+- **Treat tokens like passwords**: Never share them in code or commit them to repositories.
+- **Use environment variables** instead of hardcoding.
+- **Rotate tokens regularly** (set expiration).
+- **Prefer fine-grained tokens** for enterprise and compliance-sensitive workflows.
+
+---
+
+Would you like me to show you **how to configure GitHub CLI (`gh`) to use your token automatically**, so you don’t have to paste it every time?
+
+=======================================================================================================================================================
+
+Cloning into 'gharSoch'...
+PS D:\hackathon\realEstate\brokerAssistant\src> gh auth status
+You are not logged into any GitHub hosts. To log in, run: gh auth login
+PS D:\hackathon\realEstate\brokerAssistant\src> gh auth login
+? Where do you use GitHub? GitHub.com
+? What is your preferred protocol for Git operations on this host? SSH
+? Upload your SSH public key to your GitHub account? C:\Users\DELL\.ssh\id_ed25519.pub      
+? Title for your SSH key: (GitHub CLI) ssh_wipphanp
+
+
+? Title for your SSH key: ssh_wipphanp
+? How would you like to authenticate GitHub CLI? Login with a web browser
+
+! First copy your one-time code: 61F5-F3FB
+Press Enter to open https://github.com/login/device in your browser... 
+
+✓ Authentication complete.
+- gh config set -h github.com git_protocol ssh
+✓ Configured git protocol
+✓ SSH key already existed on your GitHub account: C:\Users\DELL\.ssh\id_ed25519.pub
+✓ Logged in as wipphanp
+PS D:\hackathon\realEstate\brokerAssistant\src> gh repo clone wipphanp/gharSoch
+
+Cloned successfully! The repo is now at gharSoch/. Want me to explore the project structure?
+
+
+=======================================================================================================================================================
+
+# --- CORE ---
+PORT=8080
+DATABASE_URL=mongodb://gharsoch-db-primary:XqbEyAG8FCj5JGgVJijX0od6Svwc19GHNa7PaZJXsp2zW9K4uNqSfBqDrcOJ7Cu2Pe5oWBParC31ACDbiFzp2A==@gharsoch-db-primary.mongo.cosmos.azure.com:10255/?ssl=true&replicaSet=globaldb&retrywrites=false&maxIdleTimeMS=120000&appName=@gharsoch-db-primary@
+APP_JWT_SECRET=01anu2003panda
+
+# --- AI ---
+OPENAI_API_KEY=ssk-proj-mXE4s7XJHPB9KFjx5etoWkR02ZMOHYkQWsmis61xcQj012OAwx55RrCSNsVr-S_e0zjwzoaNq2T3BlbkFJxe35-xc__Xy4vcp56nthZpY9bmZLj3N_CZb5U7TY64e8SdnUToPqwieF14P1VFiRONhoetGD4A
+
+# --- TELEPHONY (VAPI + TWILIO) ---
+# VAPI_API_KEY=6044d7e6-e686-46c4-829c-787cd3c8b43d
+# VAPI_PHONE_NUMBER_ID=3066afff-0894-4f5e-a42a-750e3cecd59b
+# NEXT_PUBLIC_VAPI_PUBLIC_KEY=55799a42-5f9e-4d2b-beb6-466cb2b85b08
+
+VAPI_API_KEY=d5e12a83-14ae-4b6d-bc44-1ee48360f605
+VAPI_PHONE_NUMBER_ID=da5f6ddf-eec4-4cf8-b1a2-239e5d5916ee
+NEXT_PUBLIC_VAPI_PUBLIC_KEY=57e2aff1-b9ba-4ea0-945c-ea1fb8fb1fc6
+
+
+# Sunrise Property Voice Assistants (create in Vapi Dashboard, see docs/VAPI_ASSISTANTS_SETUP.md)
+# VAPI_ASSISTANT_OUTBOUND_ID=3083a5ae-930f-4767-8c78-75a1ad3d0a82
+# VAPI_ASSISTANT_INBOUND_ID=8319ca66-f879-445a-9549-d367f6e898d8
+# VAPI_ASSISTANT_REMINDER_ID=feceda75-dd46-4891-a5d3-633e8425edeb
+
+VAPI_ASSISTANT_OUTBOUND_ID=8e7fe543-a15e-410c-8624-41e035332a7f
+VAPI_ASSISTANT_INBOUND_ID=9b282294-3983-405c-893d-cfbdf82ece23
+VAPI_ASSISTANT_REMINDER_ID=a60c720b-fa96-4e9f-b928-b94b290d5128
+
+# Twilio (import into Vapi via Dashboard → Phone Numbers → Import Twilio)
+# TWILIO_ACCOUNT_SID=AC98f729fe7cee26ee7f740bd8c1555270
+# TWILIO_AUTH_TOKEN=bbe97190c180784beb08a6f7782ff593
+
+TWILIO_ACCOUNT_SID=ACe57433dbc52f7a62dc2b8811c5d62887
+TWILIO_AUTH_TOKEN=fabdcf0be0ef056169a8ede9685ef029
+
+# --- AZURE STORAGE ---
+AZURE_STORAGE_CONNECTION_STRING="XqbEyAG8FCj5JGgVJijX0od6Svwc19GHNa7PaZJXsp2zW9K4uNqSfBqDrcOJ7Cu2Pe5oWBParC31ACDbiFzp2A=="
+AZURE_STORAGE_CONTAINER_NAME=gharsoch-assets
+
+# --- EXTERNAL SERVICES ---
+GOOGLE_CALENDAR_CLIENT_ID=xxxxxxxx
+GOOGLE_CALENDAR_CLIENT_SECRET=xxxxxxxx
+GOOGLE_CALENDAR_REDIRECT_URI=http://localhost:3333/api/auth/callback/google
+GOOGLE_CALENDAR_REFRESH_TOKEN=xxxxxxxx
+
+=======================================================================================================================================================
+
+**Yes, this is directly related to deployment.** 
+
+The workflow is named **"Build and deploy Node.js app to Azure Web App"** (as shown in `.github/workflows/main_gharsoc-app-primary.yml`). This is a CI/CD pipeline that:
+
+1. **Builds** your Node.js application
+2. **Deploys** it to an Azure Web App
+
+The failure occurred during the **build phase** (before deployment even starts), so the application never reached the deployment stage. The pipeline failed because it couldn't find the `gharsoc-web` directory, which is preventing the entire build-and-deploy process from completing.
+
+**To fix this and enable successful deployment:**
+- Ensure the `gharsoc-web` directory exists in your repository and is properly committed
+- Push the corrected code to the remote
+- This will trigger the workflow again, complete the build, and proceed to deploy to Azure
+
+Correct. This has nothing to do with local deployment of the application.
+
+This is a GitHub Actions CI/CD workflow that automatically builds and deploys your app to Azure Web App (a cloud hosting service) whenever you push code to your repository.
+
+Local deployment would mean:
+
+Running your application on your own machine for testing/development
+Using npm start or similar commands locally
+This workflow is:
+
+An automated cloud deployment pipeline
+Runs on GitHub's servers when you push code
+Deploys to Azure's servers (not your local machine)
+So to clarify your original question: You don't need to do anything locally to fix this workflow failure. You just need to ensure the gharsoc-web directory is committed and pushed to your remote repository, then the GitHub Actions workflow will automatically attempt to build and deploy to Azure again.
+
+=======================================================================================================================================================
+
+
+
+=======================================================================================================================================================
+Hi 
+I lead AI transformation initiatives focused on Agentic AI and Voice Intelligence — driving measurable enterprise impact. Happy to connect and explore what's possible. Looking forward to the conversation!
+
+Ganesh@@gmailchetty
+
+VOBIZ_CHANNEL_ID → UUID of your connected WhatsApp channel
+
+=======================================================================================================================================================
+
+
+
+
+
+
+

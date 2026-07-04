@@ -1,0 +1,164 @@
+### Summary
+**Goal:** Replace absolute‑spread entries with a tick‑level, volatility‑normalized z‑score using an adaptive hedge ratio (Kalman), staged execution (limit slices + IOC fallback), and volatility‑scaled sizing. This design enters faster on genuine edges, reduces false signals in regime shifts, and minimizes orphan‑leg losses while preserving the EA’s profitable core.
+
+---
+
+### Data Period and Granularity
+**Recommended data for development and live use**
+- **Primary backtest dataset:** **3 years** of tick data if available; otherwise **1 second bars** for intraday fidelity.  
+- **Why:** Pairs relationships and intraday microstructure matter for execution and orphan‑leg risk; 3 years captures multiple volatility regimes while keeping walk‑forward folds meaningful.  
+- **Live sampling:** process every tick; if tick unavailable, use 1s bars with last‑tick interpolation.
+
+**Practical fallback**
+- If tick data is unavailable, use **1s** bars for training and **tick** for final execution simulation.
+
+---
+
+### Full Pseudocode
+Use this as a blueprint to implement in MQL5 or your platform of choice.
+
+```
+Initialize:
+  - Set user inputs and defaults:
+      SymA, SymB, ExpiryB, CloseBeforeH
+      EWMA_half_mu = 300s, EWMA_half_sigma = 300s
+      z_entry = 2.0, z_exit = 0.5
+      Kalman_Q = 1e-5, Kalman_R = 1e-2
+      SliceSizePct = 0.33, IOC_timeout_ms = 250
+      BaseLot, MaxLot, MaxConcurrent, MinSecsBetween
+      ADF_window = 3600s, ADF_p_threshold = 0.05
+  - Initialize Kalman state for beta and intercept
+  - Initialize EWMA mean mu and variance var
+  - Initialize telemetry counters
+
+OnTick or On1s:
+  1. Read latest prices pA, pB and quotes aBid,aAsk,bBid,bAsk
+  2. If stale ticks or spreads > MaxSpread thresholds then skip
+  3. KalmanUpdate:
+       - Observation: pB
+       - Regressors: [1, pA]
+       - Update state to get intercept alpha_t and slope beta_t
+  4. Compute spread s_t = pB - beta_t * pA - alpha_t
+  5. EWMA updates:
+       - k_mu = 1 - exp(-dt / tau_mu)
+       - mu = mu + k_mu * (s_t - mu)
+       - k_var = 1 - exp(-dt / tau_sigma)
+       - var = var + k_var * ((s_t - mu)^2 - var)
+       - sigma = sqrt(max(var, small_eps))
+  6. Compute z = (s_t - mu) / sigma
+  7. Stationarity check (periodic, e.g., every 5m):
+       - Run ADF on recent residuals r = pB - beta_recent * pA - alpha_recent
+       - If p_value > ADF_p_threshold then set TradingPaused = true
+  8. Entry logic:
+       - If TradingPaused or Locked or Count>=MaxConcurrent or time since last entry < MinSecsBetween then skip
+       - If |z| >= z_entry and liquidity OK then:
+           - Determine direction: if z > 0 => short B / long A; if z < 0 => long B / short A
+           - Compute lot sizing:
+               edge = min(|z|, z_cap)
+               vol_scale = 1 / sqrt(sigma + eps)
+               lot = clamp(BaseLot * k_size * edge * vol_scale, minLot, MaxLot)
+           - Execution staging:
+               * Place limit order for primary leg at aggressive price (e.g., current bid/ask minus microtick)
+               * Wait up to IOC_timeout_ms for fill
+               * If partially filled, send IOC for remainder
+               * Only after primary leg confirmed, place secondary leg with same staged logic
+           - If secondary leg fails within CleanupSec then unwind primary immediately
+  9. Manage open pairs each tick:
+       - For each pair compute current spread cur_s and z_cur
+       - Exit if |z_cur| <= z_exit OR profit target hit OR adverse >= MaxAdverse OR hold time > MaxHoldH OR TradingPaused
+       - Use staged exit: aggressive limit to capture spread reversion; fallback to IOC
+ 10. Orphan handling:
+       - If one leg open and not closed within CleanupSec then force close with slippage budget
+ 11. Telemetry:
+       - Log orphan count, fill latency, realized sigma vs model sigma, ADF p_value
+
+Periodic maintenance:
+  - Recalibrate Kalman Q/R monthly via cross‑validation
+  - Recompute EWMA half‑lives if realized sigma drift > threshold
+  - Run parameter re‑optimization in offline environment using walk‑forward matrix
+```
+
+---
+
+### Parameter Grid for Optimization
+**Use Bayesian optimization for continuous parameters and genetic search for discrete choices.** Below is a practical grid for initial search.
+
+| **Parameter** | **Type** | **Range** | **Default** |
+|---|---:|---|---:|
+| **z_entry** | continuous | 1.5 — 3.5 | 2.0 |
+| **z_exit** | continuous | 0.2 — 1.0 | 0.5 |
+| **EWMA half life mu (secs)** | continuous | 60 — 3600 | 300 |
+| **EWMA half life sigma (secs)** | continuous | 60 — 3600 | 300 |
+| **Kalman Q (slope noise)** | log | 1e-8 — 1e-2 | 1e-5 |
+| **Kalman R (obs noise)** | log | 1e-6 — 1e-1 | 1e-2 |
+| **SliceSizePct** | discrete | 0.2;0.33;0.5 | 0.33 |
+| **IOC_timeout_ms** | discrete | 50;100;250;500 | 250 |
+| **BaseLot** | continuous | 0.01 — 0.5 | 0.03 |
+| **k_size (scaling)** | continuous | 0.5 — 5.0 | 1.0 |
+| **ADF_window (secs)** | discrete | 1800;3600;7200 | 3600 |
+| **ADF_p_threshold** | continuous | 0.01 — 0.10 | 0.05 |
+| **MaxSpreadA/B** | continuous | 0.1 — 2.0 | keep current defaults |
+
+**Notes**
+- Use log‑space sampling for Kalman Q/R.
+- Constrain lot sizes to broker min/max and risk budget.
+- Add a penalty in objective for orphan‑leg frequency.
+
+---
+
+### Walk Forward Test Matrix
+**Design:** 3 years tick data, rolling walk‑forward with nested optimization.
+
+| **Fold** | **Train Window** | **Test Window** | **Step Forward** | **#Folds (3y)** |
+|---|---:|---:|---:|---:|
+| A | 12 months | 1 month | 1 month | 24 |
+| B | 6 months | 1 month | 1 month | 30 |
+| C (stress) | 3 months | 1 month | 1 month | 36 |
+
+**Procedure**
+1. For each fold:
+   - Optimize parameters on **Train Window** using Bayesian optimizer (objective: maximize Sharpe subject to max drawdown < threshold and orphan rate < threshold).
+   - Validate best parameter set on **Test Window** (out‑of‑sample).
+   - Record metrics: Sharpe, Sortino, expectancy, win rate, avg win/loss, max drawdown, orphan count, fill latency.
+2. Aggregate results across folds:
+   - Accept parameter sets that show stable performance (Sharpe within ±20% across folds) and low orphan frequency.
+3. Final selection:
+   - Choose robust parameter set by median performance and lowest variance across folds.
+4. Live paper trade for 1 month with telemetry before live deployment.
+
+**Optimization budget**
+- Use ~200–500 Bayesian iterations per train window for continuous space; reduce for smaller windows.
+- Use parallelized backtests where possible.
+
+---
+
+### Monitoring Metrics and Live Controls
+**Real‑time telemetry to log and alert**
+- **Orphan count per day** and orphan ratio.
+- **Fill latency distribution** (ms).
+- **Realized σ vs model σ** (ratio).
+- **ADF p_value** and stationarity flag.
+- **Trade expectancy** and rolling Sharpe (30d).
+- **Max adverse per trade** breaches.
+
+**Automatic live controls**
+- **Pause trading** if ADF p_value > threshold or orphan rate spikes > limit.
+- **Reduce size** by half if realized σ > 2× model σ.
+- **Kill switch** if cumulative drawdown > pre‑set % of equity.
+
+---
+
+### Implementation Notes and Priorities
+1. **Priority 1:** Implement Kalman hedge ratio + EWMA μ/σ + z‑score entry/exit.  
+2. **Priority 2:** Staged execution with IOC fallback and micro‑liquidity checks. Simulate tick fills.  
+3. **Priority 3:** Walk‑forward optimization and Bayesian search; telemetry and ADF monitor.  
+4. **Testing:** Always validate on tick‑level simulation before increasing live size. Use slippage and latency stress tests.
+
+---
+
+**Deliverable offer**  
+I can now:
+- Produce **detailed MQL5 pseudocode** for the Kalman filter and EWMA updates ready to paste into your EA, and  
+- Generate a **concrete walk‑forward job file** (fold list and optimizer settings) you can run in your backtest engine.
+
+I will proceed to generate the MQL5‑style pseudocode and the walk‑forward job file now.

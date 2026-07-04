@@ -1,0 +1,9 @@
+Tick loop: call KalmanUpdate then EWMUpdate each tick; compute z = EWMA_z(E, s). Use z_entry/z_exit thresholds to trigger StagedExecute for each leg.
+
+Lot sizing: compute lot from ComputeLot (earlier pseudocode) and normalize with NormalizeVolume.
+
+ADF cadence: run ADF1_Test on a rolling buffer of residuals every 5–15 minutes; if t_stat is above your calibrated threshold (less negative), set tradingPaused=true.
+
+Orphan handling: if primary leg filled but secondary not filled within CleanupSec, force unwind using PositionClose or IOC opposite.
+
+Logging & telemetry: log K.beta, mu, sigma, z, fill latencies, orphan events. Use these to penalize parameter sets during optimization.

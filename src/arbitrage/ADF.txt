@@ -1,0 +1,37 @@
+//--- Simple ADF(1) on array of residuals (recent_resids)
+// Returns test statistic t_phi for regression: delta_y = phi*y_{t-1} + c + eps
+double ADF1_Test(const double &resids[], int n) {
+  if(n < 20) return 0.0; // insufficient data
+  // Build arrays: y_t and y_{t-1}
+  double sum_y = 0.0, sum_y1 = 0.0;
+  double sum_y1y1 = 0.0, sum_dy_y1 = 0.0;
+  int m = 0;
+  for(int i = 1; i < n; ++i) {
+    double y = resids[i];
+    double y1 = resids[i-1];
+    double dy = y - y1;
+    sum_y += y; sum_y1 += y1;
+    sum_y1y1 += y1*y1;
+    sum_dy_y1 += dy * y1;
+    m++;
+  }
+  if(m < 10) return 0.0;
+  // Estimate phi = (sum_dy_y1) / (sum_y1y1 - (sum_y1*sum_y1)/m)
+  double denom = sum_y1y1 - (sum_y1*sum_y1)/m;
+  if(MathAbs(denom) < 1e-12) return 0.0;
+  double phi = sum_dy_y1 / denom;
+  // Compute residuals and standard error for phi
+  double ssr = 0.0;
+  for(int i = 1; i < n; ++i) {
+    double y = resids[i];
+    double y1 = resids[i-1];
+    double dy = y - y1;
+    double eps = dy - phi * y1;
+    ssr += eps*eps;
+  }
+  double se_phi = MathSqrt(ssr / (m - 1)) / MathSqrt(denom);
+  if(se_phi <= 0) return 0.0;
+  double t_stat = phi / se_phi;
+  // Note: ADF null is phi = 0 (unit root). More negative t_stat => reject null.
+  return t_stat;
+}

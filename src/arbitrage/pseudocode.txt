@@ -1,0 +1,238 @@
+// File: WP_Improved_Kalman_Zscore.mq5  (pseudocode)
+// Purpose: Adaptive pairs trading for SymA/SymB using Kalman hedge ratio, EWMA z-score, staged execution
+
+//--- Inputs (tuneable)
+input string SymA = "XAUUSD.na";
+input string SymB = "GOLD_AUG26.na";
+input datetime ExpiryB = D'2026.07.28';
+input int CloseBeforeH = 48;
+
+input double BaseLot = 0.03;
+input double MaxLot = 0.5;
+input double k_size = 1.0;                 // sizing multiplier
+input double z_entry = 2.0;
+input double z_exit  = 0.5;
+input int    EWMA_half_mu = 300;           // seconds
+input int    EWMA_half_sigma = 300;        // seconds
+input double Kalman_Q_slope = 1e-5;
+input double Kalman_R_obs   = 1e-2;
+input double SliceSizePct = 0.33;          // fraction of full lot per slice
+input int    IOC_timeout_ms = 250;
+input int    MinSecsBetween = 480;
+input int    MaxConcurrent = 4;
+input double MaxSpreadA = 0.60;
+input double MaxSpreadB = 0.80;
+input int    CleanupSec = 15;
+input int    StaleTickSec = 20;
+input bool   DebugLog = true;
+
+//--- Globals
+double mu = 0.0;            // EWMA mean of spread
+double var = 1.0;           // EWMA variance of spread
+datetime lastRefUpdate = 0;
+bool   refInit = false;
+datetime lastEntryTime = 0;
+int    nextId = 1;
+bool   tradingPaused = false;
+
+//--- Kalman state (2 parameters: intercept alpha, slope beta)
+struct KalmanState {
+  double alpha;            // intercept
+  double beta;             // slope
+  double P[2][2];          // covariance matrix
+};
+KalmanState K;
+
+//--- Utility: EWMA gain from half-life (seconds)
+double EWMA_gain(int dt_seconds, int half_life_seconds) {
+  double tau = (double)half_life_seconds;
+  if(tau <= 0) return 1.0;
+  double k = 1.0 - MathExp(-(double)dt_seconds / tau);
+  return k;
+}
+
+//--- Initialize Kalman
+void KalmanInit(KalmanState &s) {
+  s.alpha = 0.0;
+  s.beta  = 1.0;                 // start with 1:1
+  s.P[0][0] = 1.0; s.P[0][1] = 0.0;
+  s.P[1][0] = 0.0; s.P[1][1] = 1.0;
+}
+
+//--- Kalman update for observation pB_t = alpha + beta * pA_t + noise
+void KalmanUpdate(KalmanState &s, double pA, double pB, double Q_slope, double R_obs) {
+  // State vector x = [alpha; beta]
+  // Transition: x_t = x_{t-1} + w (w ~ N(0, Q))
+  // Observation: y_t = [1, pA] * x_t + v (v ~ N(0, R))
+  double H0 = 1.0, H1 = pA;
+  // Predict covariance: P = P + Q
+  double Q00 = 1e-8; // small process noise for alpha
+  double Q11 = Q_slope; // slope noise
+  s.P[0][0] += Q00; s.P[1][1] += Q11;
+  // Compute innovation
+  double yhat = s.alpha * H0 + s.beta * H1;
+  double e = pB - yhat;
+  // Innovation covariance S = H * P * H' + R
+  double S = H0*(s.P[0][0]*H0 + s.P[0][1]*H1) + H1*(s.P[1][0]*H0 + s.P[1][1]*H1) + R_obs;
+  if(S <= 1e-12) S = 1e-12;
+  // Kalman gain K = P * H' / S
+  double K0 = (s.P[0][0]*H0 + s.P[0][1]*H1) / S;
+  double K1 = (s.P[1][0]*H0 + s.P[1][1]*H1) / S;
+  // Update state
+  s.alpha += K0 * e;
+  s.beta  += K1 * e;
+  // Update covariance P = (I - K H) P
+  double P00 = s.P[0][0], P01 = s.P[0][1], P10 = s.P[1][0], P11 = s.P[1][1];
+  s.P[0][0] = (1.0 - K0*H0)*P00 - K0*H1*P10;
+  s.P[0][1] = (1.0 - K0*H0)*P01 - K0*H1*P11;
+  s.P[1][0] = -K1*H0*P00 + (1.0 - K1*H1)*P10;
+  s.P[1][1] = -K1*H0*P01 + (1.0 - K1*H1)*P11;
+  // Symmetrize small numerical errors
+  s.P[0][1] = s.P[1][0] = 0.5*(s.P[0][1] + s.P[1][0]);
+}
+
+//--- EWMA update for mean and variance of spread
+void EWMA_Update(double s, int dt_seconds) {
+  if(!refInit) {
+    mu = s; var = 1.0; refInit = true; lastRefUpdate = TimeCurrent(); return;
+  }
+  int dt = dt_seconds; if(dt <= 0) dt = 1;
+  double k_mu = EWMA_gain(dt, EWMA_half_mu);
+  double k_var = EWMA_gain(dt, EWMA_half_sigma);
+  double delta = s - mu;
+  mu += k_mu * delta;
+  var += k_var * (delta*delta - var);
+  if(var < 1e-8) var = 1e-8;
+  lastRefUpdate = TimeCurrent();
+}
+
+//--- Compute lot size from z and sigma
+double ComputeLot(double z, double sigma) {
+  double edge = MathMin(MathAbs(z), 5.0); // cap edge
+  double vol_scale = 1.0 / MathSqrt(sigma + 1e-8);
+  double lot = BaseLot * k_size * edge * vol_scale;
+  if(lot < BaseLot) lot = BaseLot;
+  if(lot > MaxLot) lot = MaxLot;
+  // Normalize to symbol step later
+  return lot;
+}
+
+//--- Helper: check freshness and spreads
+bool MarketOk(double aBid,double aAsk,double bBid,double bAsk) {
+  if((aAsk - aBid) > MaxSpreadA) return false;
+  if((bAsk - bBid) > MaxSpreadB) return false;
+  // check stale ticks externally before calling
+  return true;
+}
+
+//--- Staged execution: place limit slice then IOC fallback
+bool PlaceStagedLeg(bool isBuy, double lot, string sym, double aggressivePrice, double iocPrice, int timeout_ms, string comment, uint &retcode) {
+  // Pseudocode:
+  // 1) Place limit order at aggressivePrice for size = lot * SliceSizePct
+  // 2) Wait up to timeout_ms for fill (poll order status)
+  // 3) If partially filled, send IOC for remainder at iocPrice
+  // 4) If limit not filled at all within timeout, send IOC for full lot at iocPrice
+  // 5) Return true if any fill occurred and retcode indicates success
+  // (Replace with actual OrderSend/OrderModify/OrderCheck logic)
+  return(true);
+}
+
+//--- Open pair (staged): primary leg first, then secondary
+void OpenPair(bool mainMode, double lotA, double lotB, double entrySpread) {
+  datetime now = TimeCurrent();
+  lastEntryTime = now;
+  int id = nextId++;
+  string comment = StringFormat("WPK#%d", id);
+  // Determine direction: mainMode true => short B / long A (as in original)
+  bool primaryIsB = true; // choose primary leg as the one with better liquidity (here B)
+  // Compute aggressive and ioc prices from quotes (use small microtick offsets)
+  // Place primary staged
+  uint ret;
+  bool primaryOk = PlaceStagedLeg(primaryIsB ? /*isBuy*/ !mainMode : mainMode,
+                                  primaryIsB ? lotB : lotA,
+                                  primaryIsB ? SymB : SymA,
+                                  /*aggressivePrice*/0.0, /*iocPrice*/0.0, IOC_timeout_ms, comment, ret);
+  if(!primaryOk) { /*log fail*/ return; }
+  // Place secondary staged
+  bool secondaryOk = PlaceStagedLeg(primaryIsB ? /*isBuy*/ mainMode : !mainMode,
+                                    primaryIsB ? lotA : lotB,
+                                    primaryIsB ? SymA : SymB,
+                                    /*aggressivePrice*/0.0, /*iocPrice*/0.0, IOC_timeout_ms, comment, ret);
+  if(!secondaryOk) {
+    // unwind primary immediately
+    // CloseId(id) or send market close for primary
+    return;
+  }
+  // success: record pair id, entrySpread, entry time
+}
+
+//--- Manage open pairs: exit on z_exit, profit, adverse, time
+void ManagePairs(double aBid,double aAsk,double bBid,double bAsk) {
+  // For each open pair:
+  //  - compute current spread cur_s = pB - beta * pA - alpha
+  //  - compute z_cur = (cur_s - mu) / sqrt(var)
+  //  - if |z_cur| <= z_exit OR profit target hit OR adverse >= MaxAdverse OR hold time > MaxHoldH => staged exit
+}
+
+//--- Orphan cleanup
+void SweepOrphans() {
+  // For each pair id: if one leg missing and (TimeCurrent() - oldest) >= CleanupSec then force close
+}
+
+//--- OnTimer / OnTick main loop
+void OnTimer() {
+  if(tradingPaused) return;
+  // 1) read ticks for SymA and SymB
+  double aBid,aAsk,bBid,bAsk;
+  if(!GetQuotes(SymA, aBid, aAsk) || !GetQuotes(SymB, bBid, bAsk)) return;
+  // 2) freshness check
+  if(!BothFresh()) return;
+  // 3) Kalman update using last trade prices (mid)
+  double pA = (aBid + aAsk) / 2.0;
+  double pB = (bBid + bAsk) / 2.0;
+  KalmanUpdate(K, pA, pB, Kalman_Q_slope, Kalman_R_obs);
+  // 4) compute spread using adaptive hedge ratio
+  double s = pB - (K.beta * pA + K.alpha);
+  // 5) EWMA update
+  int dt = (int)(TimeCurrent() - lastRefUpdate);
+  if(dt <= 0) dt = 1;
+  EWMA_Update(s, dt);
+  double sigma = MathSqrt(var);
+  double z = (s - mu) / (sigma + 1e-8);
+  // 6) stationarity check (periodic): run ADF on recent residuals (offline or low-frequency)
+  // 7) entry conditions
+  if(TimeCurrent() - lastEntryTime >= MinSecsBetween && CountOpenPairs() < MaxConcurrent && MarketOk(aBid,aAsk,bBid,bAsk)) {
+    if(MathAbs(z) >= z_entry) {
+      // direction: z > 0 => expect spread to fall => short B, long A
+      bool mainMode = (z > 0); // true => short B / long A
+      double lotA = ComputeLot(z, sigma);
+      double lotB = lotA; // or use LotB scaling with tick-value or K.beta
+      // normalize lots to symbol steps and caps
+      OpenPair(mainMode, lotA, lotB, s);
+    }
+  }
+  // 8) manage existing pairs
+  ManagePairs(aBid,aAsk,bBid,bAsk);
+  // 9) sweep orphans
+  SweepOrphans();
+  // 10) telemetry/logging
+  if(DebugLog) PrintFormat("tick z=%.3f beta=%.6f mu=%.3f sigma=%.4f", z, K.beta, mu, sigma);
+}
+
+//--- Helpers (stubs to be implemented with platform API)
+bool GetQuotes(string sym, double &bid, double &ask) { /* platform tick read */ return(true); }
+bool BothFresh() { /* check tick timestamps vs StaleTickSec */ return(true); }
+int CountOpenPairs() { /* count positions with magic */ return(0); }
+void PrintFormat(string fmt, ...) { /* logging */ }
+
+//--- OnInit
+int OnInit() {
+  KalmanInit(K);
+  // set timers, select symbols, set trade deviation, etc.
+  return(INIT_SUCCEEDED);
+}
+
+//--- OnDeinit
+void OnDeinit(const int reason) {
+  // cleanup
+}

@@ -1,0 +1,97 @@
+//--- Helper: normalize volume to symbol step
+double NormalizeVolume(string symbol, double vol) {
+  double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+  double minv = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+  double maxv = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+  if(step <= 0) step = 0.01;
+  double v = MathRound(vol / step) * step;
+  if(v < minv) v = minv;
+  if(v > maxv) v = maxv;
+  return NormalizeDouble(v, 2);
+}
+
+//--- Place limit order (returns ticket or 0)
+ulong PlaceLimitOrder(string symbol, bool isBuy, double price, double volume, string comment) {
+  MqlTradeRequest req; MqlTradeResult res; MqlTradeCheckResult check;
+  ZeroMemory(req); ZeroMemory(res); ZeroMemory(check);
+  req.action = TRADE_ACTION_PENDING;
+  req.symbol = symbol;
+  req.volume = volume;
+  req.type = isBuy ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+  req.price = price;
+  req.deviation = 10;
+  req.type_filling = ORDER_FILLING_FOK; // try FOK first if supported
+  req.type_time = ORDER_TIME_GTC;
+  req.comment = comment;
+  if(!OrderCheck(req, check)) {
+    // log check.comment
+  }
+  if(!OrderSend(req, res)) {
+    // log res.comment
+    return 0;
+  }
+  return res.order;
+}
+
+//--- Place IOC market order (via ORDER_TYPE_BUY or SELL with type_time=IOC)
+ulong PlaceIOCMarket(string symbol, bool isBuy, double volume, string comment) {
+  MqlTradeRequest req; MqlTradeResult res;
+  ZeroMemory(req); ZeroMemory(res);
+  req.action = TRADE_ACTION_DEAL;
+  req.symbol = symbol;
+  req.volume = volume;
+  req.type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+  req.price = 0; // market
+  req.deviation = 50;
+  req.type_filling = ORDER_FILLING_IOC;
+  req.comment = comment;
+  if(!OrderSend(req, res)) {
+    return 0;
+  }
+  return res.order; // deal ticket or 0
+}
+
+//--- Staged execution: try limit slice then IOC fallback
+bool StagedExecute(string symbol, bool isBuy, double totalVolume, double limitPrice, int wait_ms, string comment) {
+  double slice = totalVolume * SliceSizePct;
+  slice = NormalizeVolume(symbol, slice);
+  double remaining = totalVolume;
+  // 1) Place limit slice
+  ulong ord = PlaceLimitOrder(symbol, isBuy, limitPrice, slice, comment);
+  if(ord == 0) {
+    // limit placement failed; fallback to IOC for full volume
+    ulong d = PlaceIOCMarket(symbol, isBuy, NormalizeVolume(symbol, totalVolume), comment);
+    return (d != 0);
+  }
+  // 2) Wait up to wait_ms for fill (poll position/deals)
+  int elapsed = 0; int step = 50;
+  bool filled = false;
+  while(elapsed < wait_ms) {
+    Sleep(step); elapsed += step;
+    // Check if order filled by scanning deals or positions
+    // If filled, set filled=true and break
+    // Implementation depends on broker: use HistoryDealsTotal/HistoryDealGetTicket or PositionSelect
+    if(OrderIsFilled(ord)) { filled = true; break; } // OrderIsFilled is a placeholder
+  }
+  if(filled) {
+    remaining = totalVolume - slice;
+    if(remaining <= 0.0) return true;
+    // Place IOC for remainder
+    ulong d = PlaceIOCMarket(symbol, isBuy, NormalizeVolume(symbol, remaining), comment);
+    return (d != 0);
+  } else {
+    // Limit not filled in time: cancel limit and send IOC for full volume
+    CancelOrder(ord);
+    ulong d = PlaceIOCMarket(symbol, isBuy, NormalizeVolume(symbol, totalVolume), comment);
+    return (d != 0);
+  }
+}
+
+//--- Placeholder helpers (implement with platform APIs)
+bool OrderIsFilled(ulong order_ticket) {
+  // Implement: check order/deal history to see if order_ticket produced a deal
+  return false;
+}
+void CancelOrder(ulong order_ticket) {
+  // Implement: send ORDER_ACTION_REMOVE for pending order
+}

@@ -1,16 +1,17 @@
 ﻿//+------------------------------------------------------------------+
-//|                                        ea_5minCandle_scalp_v4.mq5 |
+//|                                   ea_5minCandle_scalp_v3_git.mq5 |
 //|                                  Copyright 2025, MetaQuotes Ltd. |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.00"
+#property version   "1.00"
 
 //+------------------------------------------------------------------+
-//| M5 Candle Scalper v4 — Optimized Entry Filters                   |
-//| Lower entry thresholds for more trades on both sides             |
-//| Same optimized exit logic as v3                                  |
+//| M5 Candle Scalper v3 — Optimized Exit Logic                      |
+//| Dynamic SL/TP based on volatility + ATR-based trailing           |
+//| Profit targets adjusted to catch more winners                    |
+//| Loss prevention via dynamic stop management                      |
 //+------------------------------------------------------------------+
 
 #include <Trade/Trade.mqh>
@@ -24,21 +25,21 @@ input long MagicNumber = 20260607;
 
 //=== DYNAMIC SL/TP OPTIMIZATION (NEW v3) ===
 input bool UseDynamic_SLTP = true;        // Use dynamic ATR-based SL/TP with volatility adjustment
-input double ATR_SL_Mult = 1.2;           // REDUCED from 1.5 - tighter stop, less loss per trade
-input double ATR_TP_Mult = 3.0;           // INCREASED from 2.5 - better reward ratio
+input double ATR_SL_Mult = 1.2;           // Reduced from 1.5 - tighter stop
+input double ATR_TP_Mult = 3.0;           // Increased from 2.5 - better reward ratio
 input double Min_RR_Ratio = 1.5;          // Minimum Risk-Reward ratio required
 input double Max_TP_Points = 150;         // Cap TP at this many points (avoid too high)
 input double Min_TP_Points = 40;          // Minimum TP to ensure worthwhile trades
 
 //=== #3 HOLD WINNERS PAST CANDLE (IMPROVED) ===
 input bool HoldWinnersPastCandle = true;
-input double HoldMinProfitPoints = 20;    // REDUCED from 30 - catch smaller trends
+input double HoldMinProfitPoints = 20;    // Reduced from 30 - catch smaller trends
 input double HoldTrailBuffer = 10;        // Keep trail buffer this far behind price
 
 //=== #4 TRAILING STOP (OPTIMIZED) ===
 input bool UseTrailingStop = true;
-input double Trail_ATR_Mult = 0.8;        // REDUCED from 1.0 - tighter trail
-input int Trail_StartPoints = 25;         // REDUCED from 40 - trail earlier
+input double Trail_ATR_Mult = 0.8;        // Reduced from 1.0 - tighter trail
+input int Trail_StartPoints = 25;         // Reduced from 40 - trail earlier
 input int Trail_StepPoints = 15;          // Move SL by this much when trailing
 
 //=== #5 MTF SCORING ===
@@ -69,10 +70,19 @@ input int EMA_Slow_Period = 21;
 
 //=== MOMENTUM & FILTERS ===
 input int MomentumCandles = 3;
-input double MinAvgBody_Points = 10.0;    // REDUCED from 15.0 - catch more setups
-input double MinATR_Points = 15.0;        // REDUCED from 25.0 - more entry opportunities
-input double RSI_BuyAbove = 51.0;         // REDUCED from 52.0 - more BUY opportunities
-input double RSI_SellBelow = 47.0;        // REDUCED from 48.0 - more SELL opportunities
+input double MinAvgBody_Points = 15.0;    // Reduced to catch more setups
+input double MinATR_Points = 25.0;        // Reduced for more opportunities
+input double RSI_BuyAbove = 52.0;
+input double RSI_SellBelow = 48.0;
+
+//=== EARLY REVERSAL MANAGEMENT (NEW v3.1) === [ADDED: v3.1 NEW PARAMETERS]
+input bool UseEarlyReversalClose = true;        // Close trade early if direction reverses significantly
+input double EarlyCloseThreshold = 0.6;         // Close if price moves 60% toward opposite SL
+input bool AllowCounterTrade = true;            // Take opposite trade after early close
+input double EmergencyExitPercent = 0.7;        // Emergency exit if trade moves 70% against us
+input int MaxTradeTimeSeconds = 150;           // Max time to hold a trade (2.5 minutes)
+input bool UseBreakevenStop = true;            // Move SL to breakeven when profit reaches 0.3x SL
+input double BreakevenTrigger = 0.3;           // Trigger breakeven at 30% of SL distance
 
 //=== AI BIAS ===
 input bool UseAI_Bias = true;
@@ -98,6 +108,14 @@ int LastTradeDay = -1;
 double DailyStartBalance = 0;
 bool DailyLimitHit = false;
 
+//=== REVERSAL MANAGEMENT STATE === [ADDED: v3.1 NEW STATE VARIABLES]
+datetime TradeOpenTime = 0;
+ulong CurrentTradeTicket = 0;
+bool EarlyCloseExecuted = false;
+bool CounterTradeAllowed = false;
+string LastClosedDirection = "NONE";
+double LastClosedProfit = 0;
+
 // Hardcoded profit target
 double TakeProfit_Dollars = 12.03;
 
@@ -107,6 +125,7 @@ int hEMA_Fast_M15, hEMA_Slow_M15;
 int hRSI_M5;
 int hATR_M5;
 int hMA20_H1, hMA50_H1, hRSI_H1;
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -129,11 +148,20 @@ int OnInit()
       hEMA_Fast_M15 == INVALID_HANDLE || hEMA_Slow_M15 == INVALID_HANDLE)
       return(INIT_FAILED);
    
-   Print("[INIT] M5 Candle Scalper v4 (Optimized Entry)");
+   Print("[INIT] M5 Candle Scalper v3 (Optimized Exit)");
    Print("[INIT] SL=" + DoubleToString(ATR_SL_Mult, 2) + "xATR | TP=" + DoubleToString(ATR_TP_Mult, 2) + "xATR");
    Print("[INIT] Trail start=" + IntegerToString(Trail_StartPoints) + "pts | Step=" + IntegerToString(Trail_StepPoints) + "pts");
    
    DailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   
+   // Initialize new state variables [ADDED: v3.1 INITIALIZATION]
+   TradeOpenTime = 0;
+   CurrentTradeTicket = 0;
+   EarlyCloseExecuted = false;
+   CounterTradeAllowed = false;
+   LastClosedDirection = "NONE";
+   LastClosedProfit = 0;
+   
    return(INIT_SUCCEEDED);
 }
 
@@ -181,6 +209,18 @@ void OnTick()
    {
       CheckProfitTarget();
       if(UseTrailingStop) ManageTrailing();
+      
+      // New: Early reversal management [ADDED: v3.1 EARLY REVERSAL CHECK]
+      if(UseEarlyReversalClose) CheckEarlyReversal();
+      
+      // New: Breakeven stop management [ADDED: v3.1 BREAKEVEN STOP CHECK]
+      if(UseBreakevenStop) CheckBreakevenStop();
+      
+      // New: Max time exit [ADDED: v3.1 MAX TIME CHECK]
+      CheckMaxTradeTime();
+      
+      // New: Consider counter trade after early exit [ADDED: v3.1 COUNTER TRADE CHECK]
+      ConsiderCounterTrade();
    }
    
    datetime currentM5 = iTime(_Symbol, PERIOD_M5, 0);
@@ -435,12 +475,15 @@ void ExecuteBuy()
    double sl = NormalizeDouble(ask - sl_dist, _Digits);
    double tp = NormalizeDouble(ask + tp_dist, _Digits);
 
-   if(!trade.Buy(lot, _Symbol, ask, sl, tp, "M5v4 BUY"))
+   if(!trade.Buy(lot, _Symbol, ask, sl, tp, "M5v3 BUY"))
       Print("[ERROR] BUY failed: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
    else
    {
       TradeOpenThisCandle = true;
       TodayTrades++;
+      TradeOpenTime = TimeCurrent();           // [ADDED: v3.1 RECORD TRADE TIME]
+      EarlyCloseExecuted = false;              // [ADDED: v3.1 RESET EARLY CLOSE FLAG]
+      CounterTradeAllowed = false;             // [ADDED: v3.1 RESET COUNTER TRADE FLAG]
       Print("[ENTRY] BUY ", lot, " lots | SL:", sl, " TP:", tp);
    }
 }
@@ -456,12 +499,15 @@ void ExecuteSell()
    double sl = NormalizeDouble(bid + sl_dist, _Digits);
    double tp = NormalizeDouble(bid - tp_dist, _Digits);
 
-   if(!trade.Sell(lot, _Symbol, bid, sl, tp, "M5v4 SELL"))
+   if(!trade.Sell(lot, _Symbol, bid, sl, tp, "M5v3 SELL"))
       Print("[ERROR] SELL failed: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
    else
    {
       TradeOpenThisCandle = true;
       TodayTrades++;
+      TradeOpenTime = TimeCurrent();           // [ADDED: v3.1 RECORD TRADE TIME]
+      EarlyCloseExecuted = false;              // [ADDED: v3.1 RESET EARLY CLOSE FLAG]
+      CounterTradeAllowed = false;             // [ADDED: v3.1 RESET COUNTER TRADE FLAG]
       Print("[ENTRY] SELL ", lot, " lots | SL:", sl, " TP:", tp);
    }
 }
@@ -493,13 +539,29 @@ void CheckProfitTarget()
       double atr = GetATR() / _Point;
       double dynamicTP = atr * 2.0;
       
-      if(profitPoints >= dynamicTP)
+      // MODIFIED: v3.1 - Only take dynamic TP if we're at least halfway through the candle
+      // This prevents taking small profits too early [CHANGE: ADDED TIME FILTER]
+      datetime currentTime = TimeCurrent();
+      datetime candleStart = iTime(_Symbol, PERIOD_M5, 0);
+      int secondsInCandle = (int)(currentTime - candleStart);
+      
+      if(profitPoints >= dynamicTP && secondsInCandle >= 150) // At least 2.5 minutes into candle
       {
          ulong ticket = PositionGetInteger(POSITION_TICKET);
          trade.PositionClose(ticket);
          TodayWins++;
          TradeOpenThisCandle = false;
          Print("[DYNAMIC TP] Profit: ", IntegerToString((int)profitPoints), "pts | Closed at optimal level");
+      }
+      // ADDED: v3.1 - Small profit lock if trade is struggling [NEW: PARTIAL PROFIT LOCK]
+      else if(profitPoints >= (atr * 0.8) && profitPoints < dynamicTP && secondsInCandle >= 180)
+      {
+         // If we have some profit but not reaching target, and candle is ending soon
+         ulong ticket = PositionGetInteger(POSITION_TICKET);
+         trade.PositionClose(ticket);
+         TodayWins++;
+         TradeOpenThisCandle = false;
+         Print("[PARTIAL TP] Locked +", IntegerToString((int)profitPoints), "pts before candle end");
       }
    }
 }
@@ -521,6 +583,7 @@ void HandleCandleEndClose()
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double profitPts = (type == POSITION_TYPE_BUY) ? (bid - openPrice)/_Point : (openPrice - ask)/_Point;
       
+      // Only hold winners past candle if option enabled AND profit is decent
       if(HoldWinnersPastCandle && profitPts >= HoldMinProfitPoints)
       {
          Print("[HOLD] Winner running (+", IntegerToString((int)profitPts), "pts). Trail buffer: ", 
@@ -528,12 +591,15 @@ void HandleCandleEndClose()
          continue;
       }
       
-      if(profit >= -1.00)
+      // MODIFIED: v3.1 - Don't close small losses prematurely - let SL handle it [CHANGE: FIXED EXIT LOGIC]
+      // Only close at candle end if we have some profit or it's break-even
+      if(profit > 0)
       {
          trade.PositionClose(ticket);
-         if(profit > 0) TodayWins++; else TodayLosses++;
-         Print("[CANDLE END] ", (profit>0 ? "WIN +$" : "LOSS $"), DoubleToString(profit, 2));
+         TodayWins++;
+         Print("[CANDLE END] WIN +$", DoubleToString(profit, 2));
       }
+      // MODIFIED: v3.1 - Let losing positions ride to their proper SL [CHANGE: NO MORE EARLY LOSS CLOSE]
    }
 }
 
@@ -731,3 +797,207 @@ string ExtractSignal(string jsonText, int &confidence)
    else confidence = 50;
    return signal;
 }
+
+//+------------------------------------------------------------------+
+//| Early Reversal Detection - Close trade early if reversing        |
+//+------------------------------------------------------------------+
+void CheckEarlyReversal()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      
+      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      
+      // Calculate how far price has moved toward opposite direction
+      double progressTowardOpposite = 0;
+      
+      if(type == POSITION_TYPE_BUY)
+      {
+         // For BUY: check how far price has fallen from open toward SL
+         if(sl > 0)
+         {
+            double totalDistance = openPrice - sl;  // Distance from open to SL
+            double currentFall = openPrice - bid;   // How much price has fallen
+            if(totalDistance > 0) 
+               progressTowardOpposite = currentFall / totalDistance;
+         }
+         
+         // Emergency exit: if price moves significantly against us
+         // ADDED: v3.1 - Emergency exit if price moves significantly against us [NEW: EARLY EXIT LOGIC]
+         if(EmergencyExitPercent > 0 && progressTowardOpposite >= EmergencyExitPercent)
+         {
+            trade.PositionClose(ticket);
+            TodayLosses++;
+            TradeOpenThisCandle = false;
+            EarlyCloseExecuted = true;          // [ADDED: v3.1 SET EARLY CLOSE FLAG]
+            Print("[EMERGENCY EXIT] BUY closed early at ", DoubleToString(bid, _Digits), 
+                  " | Progress to SL: ", DoubleToString(progressTowardOpposite*100, 1), "%");
+            
+            if(AllowCounterTrade && !CounterTradeAllowed)
+            {
+               CounterTradeAllowed = true;      // [ADDED: v3.1 ENABLE COUNTER TRADE]
+               Print("[REVERSAL] Price reversed strongly - considering counter trade");
+            }
+            return;
+         }
+      }
+      else if(type == POSITION_TYPE_SELL)
+      {
+         // For SELL: check how far price has risen from open toward SL
+         if(sl > 0)
+         {
+            double totalDistance = sl - openPrice;  // Distance from SL to open
+            double currentRise = ask - openPrice;   // How much price has risen
+            if(totalDistance > 0)
+               progressTowardOpposite = currentRise / totalDistance;
+         }
+         
+         // ADDED: v3.1 - Emergency exit if price moves significantly against us [NEW: EARLY EXIT LOGIC]
+         if(EmergencyExitPercent > 0 && progressTowardOpposite >= EmergencyExitPercent)
+         {
+            trade.PositionClose(ticket);
+            TodayLosses++;
+            TradeOpenThisCandle = false;
+            EarlyCloseExecuted = true;          // [ADDED: v3.1 SET EARLY CLOSE FLAG]
+            Print("[EMERGENCY EXIT] SELL closed early at ", DoubleToString(ask, _Digits),
+                  " | Progress to SL: ", DoubleToString(progressTowardOpposite*100, 1), "%");
+            
+            if(AllowCounterTrade && !CounterTradeAllowed)
+            {
+               CounterTradeAllowed = true;      // [ADDED: v3.1 ENABLE COUNTER TRADE]
+               Print("[REVERSAL] Price reversed strongly - considering counter trade");
+            }
+            return;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Breakeven Stop Management - Move SL to breakeven                 |
+//+------------------------------------------------------------------+
+void CheckBreakevenStop()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      
+      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      
+      // Calculate profit in points
+      double profitPoints = 0;
+      double priceCurrent = (type == POSITION_TYPE_BUY) ? bid : ask;
+      
+      if(type == POSITION_TYPE_BUY)
+         profitPoints = (bid - openPrice) / _Point;
+      else if(type == POSITION_TYPE_SELL)
+         profitPoints = (openPrice - ask) / _Point;
+      
+      // ADDED: v3.1 - Calculate original SL distance [NEW: BREAKEVEN LOGIC]
+      double originalSLDistance = 0;
+      if(type == POSITION_TYPE_BUY && sl > 0)
+         originalSLDistance = (openPrice - sl) / _Point;
+      else if(type == POSITION_TYPE_SELL && sl > 0)
+         originalSLDistance = (sl - openPrice) / _Point;
+      
+      // ADDED: v3.1 - Move SL to breakeven if profit reaches trigger percentage [NEW: RISK FREE TRADE]
+      if(originalSLDistance > 0 && profitPoints >= (originalSLDistance * BreakevenTrigger))
+      {
+         double newSL = openPrice;
+         if(trade.PositionModify(ticket, newSL, tp))
+         {
+            Print("[BREAKEVEN] SL moved to entry price at ", DoubleToString(profitPoints, 0), "pts profit");
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Max Trade Time Check - Close trades that run too long            |
+//+------------------------------------------------------------------+
+// ADDED: v3.1 - CheckMaxTradeTime function [NEW: MAX TIME EXIT]
+void CheckMaxTradeTime()
+{
+   if(MaxTradeTimeSeconds <= 0) return;
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      
+      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      datetime positionTime = (datetime)PositionGetInteger(POSITION_TIME);
+      datetime currentTime = TimeCurrent();
+      
+      // ADDED: v3.1 - Close trade if it runs too long [NEW: TIME-BASED EXIT]
+      if((currentTime - positionTime) >= MaxTradeTimeSeconds)
+      {
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         trade.PositionClose(ticket);
+         
+         if(profit > 0) TodayWins++; else TodayLosses++;
+         TradeOpenThisCandle = false;
+         
+         Print("[MAX TIME] Trade closed after ", MaxTradeTimeSeconds, " seconds | P&L: $", DoubleToString(profit, 2));
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Consider Counter Trade - After early exit, check if we should    |
+//| take opposite trade                                              |
+//+------------------------------------------------------------------+
+// ADDED: v3.1 - ConsiderCounterTrade function [NEW: COUNTER TRADE LOGIC]
+void ConsiderCounterTrade()
+{
+   if(!AllowCounterTrade || !CounterTradeAllowed) return;
+   
+   // ADDED: v3.1 - Check if we had an early close recently [NEW: COUNTER TRADE CONDITION]
+   if(!EarlyCloseExecuted) return;
+   
+   // ADDED: v3.1 - Only consider counter trade in same candle [NEW: TIMING FILTER]
+   datetime currentM5 = iTime(_Symbol, PERIOD_M5, 0);
+   if(currentM5 != LastM5CandleTime) 
+   {
+      CounterTradeAllowed = false; // New candle, reset
+      return;
+   }
+   
+   // ADDED: v3.1 - Wait a bit after early close [NEW: DELAYED ENTRY]
+   datetime now = TimeCurrent();
+   if((now - TradeOpenTime) < 30) return; // Wait at least 30 seconds
+   
+   // ADDED: v3.1 - Check current market conditions [NEW: RE-ENTRY ANALYSIS]
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   // ADDED: v3.1 - Get fresh direction signal [NEW: RE-EVALUATION]
+   string newDirection = DecideDirection();
+   
+   // ADDED: v3.1 - If new direction is opposite to what we just closed, consider it [NEW: OPPOSITE TRADE]
+   // (Note: We would need to track what direction we just closed)
+   Print("[COUNTER TRADE] Evaluating opposite position. New signal: ", newDirection);
+   
+   CounterTradeAllowed = false; // Reset flag [ADDED: v3.1 RESET COUNTER TRADE FLAG]
+}
+
+//+------------------------------------------------------------------+

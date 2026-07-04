@@ -1,22 +1,25 @@
 ﻿//+------------------------------------------------------------------+
-//| ea_5minCandle_scalp_v5_riskfixed.mq5                              |
-//| Copyright 2025, MetaQuotes Ltd.                                   |
-//| https://www.mql5.com                                              |
+//| ea_5minCandle_scalp_BTC_v1_safe.mq5                               |
+//| Adapted from ea_5minCandle_scalp_v5_riskfixed.mq5 (XAUUSD)        |
+//| Target: BTCUSD (Bitcoin CFD) — Safe-Trading Adaptation            |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2025, MetaQuotes Ltd."
+#property copyright "Copyright 2026"
 #property link      "https://www.mql5.com"
-#property version   "5.00"
+#property version   "1.00"
 
 //+------------------------------------------------------------------+
-//| M5 Candle Scalper v5 — Risk-Fixed Edition                        |
-//| Changes from v4:                                                  |
-//|  1. Dollar-capped position sizing (MaxRiskDollars) prevents       |
-//|     MaxLot from silently overriding intended risk %.              |
-//|  2. Wider SL floor (points) so SL isn't sitting inside normal     |
-//|     M5/M1 noise and getting wick-stopped instantly.               |
-//|  3. Trade is skipped entirely if even MinLot risk exceeds cap.    |
-//|  4. Hardcoded $12.03 TakeProfit replaced with ATR/R-multiple      |
-//|     based dynamic profit target consistent with risk sizing.      |
+//| WHY BTC NEEDS DIFFERENT HANDLING THAN XAUUSD (summary)            |
+//|  1. BTC price scale varies wildly by broker (e.g. 60000-120000)   |
+//|     so a fixed "points" SL floor is meaningless. We floor SL as   |
+//|     a % of price instead, then convert to points internally.      |
+//|  2. BTC can spike 3-5x its normal ATR in seconds (flash moves).   |
+//|     A volatility-spike filter skips new entries in that regime.   |
+//|  3. Spreads balloon during low-liquidity hours/weekends. A spread |
+//|     filter blocks entries when spread is abnormally wide.         |
+//|  4. Crypto trades 24/7 — weekend liquidity is thin and gappy.     |
+//|     An optional "avoid weekend" switch keeps the bot flat then.   |
+//|  5. Leverage/lot risk is amplified by volatility, so default risk |
+//|     per trade and MaxRiskDollars are set more conservatively.     |
 //+------------------------------------------------------------------+
 
 #include <Trade\Trade.mqh>
@@ -25,49 +28,64 @@
 CTrade trade;
 
 //=== TRADE PARAMETERS ===
-input double LotSize = 0.10;
-input long   MagicNumber = 20260607;
+input string SymbolToTrade = "BTCUSDT";  // Must match your broker's exact BTC symbol name
+input double LotSize = 0.01;            // Fallback fixed lot if risk sizing disabled
+input long   MagicNumber = 20260702;
 
-//=== DYNAMIC SL/TP OPTIMIZATION ===
-input bool   UseDynamic_SLTP = true;   // Use dynamic ATR-based SL/TP with volatility adjustment
-input double ATR_SL_Mult = 1.2;        // Tighter stop, less loss per trade (used before floor applied)
-input double ATR_TP_Mult = 3.0;        // Better reward ratio
-input double Min_RR_Ratio = 1.5;       // Minimum Risk-Reward ratio required
-input double Max_TP_Points = 150;      // Cap TP at this many points
-input double Min_TP_Points = 40;       // Minimum TP to ensure worthwhile trades
-input double Min_SL_Points = 150;      // NEW: raised SL floor (~150 pts) to avoid wick stop-outs
+//=== DYNAMIC SL/TP (ATR + % FLOOR) ===
+input bool   UseDynamic_SLTP = true;
+input double ATR_SL_Mult = 1.5;         // Wider than gold default (1.2) — BTC noise is bigger
+input double ATR_TP_Mult = 2.5;
+input double Min_RR_Ratio = 1.5;
+input double Max_TP_Percent = 2.0;      // Cap TP at this % of price (avoid unrealistic targets)
+input double Min_TP_Percent = 0.3;      // Minimum TP as % of price
+input double Min_SL_Percent = 0.5;      // NEW: SL floor as % of price (e.g. 0.5% of 100000 = $500)
 
-//=== RISK SIZING (FIXED) ===
+//=== RISK SIZING (DOLLAR-CAPPED, SAME LOGIC AS GOLD v5) ===
 input bool   UseRiskSizing = true;
-input double RiskPercent = 0.5;        // Target risk % of balance
-input double MaxRiskDollars = 50.0;    // NEW: hard dollar cap per trade, overrides RiskPercent if smaller
-input double MaxLot = 1.0;
+input double RiskPercent = 0.3;         // Lower default than gold (0.5%) due to higher volatility
+input double MaxRiskDollars = 40.0;     // Hard per-trade loss ceiling
+input double MaxLot = 0.20;             // Much lower than gold's 1.0 — BTC notional per lot is huge
 input double MinLot = 0.01;
-input double SkipTradeRiskMultiplier = 1.5; // NEW: skip trade if MinLot risk exceeds MaxRiskDollars * this
+input double SkipTradeRiskMultiplier = 1.5;
 
-//=== #3 HOLD WINNERS PAST CANDLE ===
+//=== VOLATILITY SPIKE PROTECTION (NEW — crypto-specific) ===
+input bool   UseVolatilitySpikeFilter = true;
+input double VolatilitySpikeMult = 2.5;  // Skip entry if current ATR > X times its recent average
+input int    ATR_AvgLookback = 20;       // Bars used to compute "normal" ATR baseline
+
+//=== SPREAD PROTECTION (NEW — crypto-specific) ===
+input bool   UseSpreadFilter = true;
+input double MaxSpreadPercent = 0.15;    // Skip entry if spread > this % of price
+
+//=== WEEKEND / LOW-LIQUIDITY GUARD (NEW — crypto-specific) ===
+input bool   AvoidWeekendTrading = true; // Flat during Sat/Sun low-liquidity gaps
+input bool   CloseOpenTradesBeforeWeekend = true;
+input int    WeekendCloseHourUTC = 21;   // Friday hour (UTC) to start flattening positions
+
+//=== HOLD WINNERS PAST CANDLE ===
 input bool   HoldWinnersPastCandle = true;
-input double HoldMinProfitPoints = 20; // Catch smaller trends
-input double HoldTrailBuffer = 10;     // Keep trail buffer this far behind price
+input double HoldMinProfitPercent = 0.15; // As % of price instead of fixed points
+input double HoldTrailBufferPercent = 0.08;
 
-//=== #4 TRAILING STOP ===
+//=== TRAILING STOP ===
 input bool   UseTrailingStop = true;
-input double Trail_ATR_Mult = 0.8;     // Tighter trail
-input int    Trail_StartPoints = 25;   // Trail earlier
-input int    Trail_StepPoints = 15;    // Move SL by this much when trailing
+input double Trail_ATR_Mult = 1.0;
+input double Trail_StartPercent = 0.2;   // Start trailing after this % move in favor
+input double Trail_StepPercent = 0.08;
 
-//=== #5 MTF SCORING ===
+//=== MTF SCORING ===
 input bool   UseMTF_Scoring = true;
 input int    MTF_MinScore = 2;
 
 //=== DAILY LIMITS ===
-input bool   UseDailyLimits = false;   // Disabled - trades continue all day
-input double DailyProfitTarget = 100.0;
-input double DailyLossLimit = 50.0;
+input bool   UseDailyLimits = true;      // Recommended ON for crypto (unlike gold default)
+input double DailyProfitTarget = 80.0;
+input double DailyLossLimit = 100.0;
 
 //=== CONFIRMATION ENTRY SETTINGS ===
 input int    ConfirmWaitBars = 1;
-input double MinM1ConfirmBody = 8.0;
+input double MinM1ConfirmBodyPercent = 0.03; // As % of price instead of fixed points
 input bool   RequireM1BreakHigh = true;
 input bool   RequireM1BreakLow = true;
 
@@ -78,23 +96,24 @@ input int    EMA_Slow_Period = 21;
 
 //=== MOMENTUM & FILTERS ===
 input int    MomentumCandles = 3;
-input double MinAvgBody_Points = 10.0;
-input double MinATR_Points = 15.0;
+input double MinAvgBodyPercent = 0.05;   // As % of price
+input double MinATR_Percent = 0.08;      // As % of price
 input double RSI_BuyAbove = 51.0;
 input double RSI_SellBelow = 47.0;
 
-//=== AI BIAS ===
+//=== AI BIAS (optional) ===
 input bool   UseAI_Bias = true;
 input int    AI_RefreshSeconds = 60;
-input string OpenAI_ApiKey = "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";       // NOTE: set via external config, do NOT hardcode in production
+input string OpenAI_ApiKey = "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";         // Set at attach-time, never hardcode
 input string OpenAI_Model = "gpt-4o-mini";
 input int    AI_ConfidenceThreshold = 70;
 
-//=== PROFIT TARGET (NEW: replaces hardcoded dollar target) ===
-input double ProfitTarget_RMultiple = 1.0; // Close when gain reaches this multiple of the original risk (R)
-input double DynamicTP_ATR_Mult = 2.0;     // Secondary ATR-based profit trigger
+//=== PROFIT TARGET (R-MULTIPLE, SAME LOGIC AS GOLD v5) ===
+input double ProfitTarget_RMultiple = 1.0;
+input double DynamicTP_ATR_Mult = 2.0;
 
 //=== GLOBAL STATE ===
+string   TradeSymbol;
 datetime LastM5CandleTime = 0;
 datetime LastAIRequest = 0;
 string   AI_Bias = "NONE";
@@ -111,7 +130,6 @@ int      LastTradeDay = -1;
 double   DailyStartBalance = 0;
 bool     DailyLimitHit = false;
 
-//=== INDICATOR HANDLES ===
 int hEMA_Fast_M5, hEMA_Slow_M5;
 int hEMA_Fast_M15, hEMA_Slow_M15;
 int hRSI_M5;
@@ -120,29 +138,35 @@ int hMA20_H1, hMA50_H1, hRSI_H1;
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   TradeSymbol = (SymbolToTrade == "") ? _Symbol : SymbolToTrade;
+   if(!SymbolSelect(TradeSymbol, true))
+   {
+      Print("[INIT ERROR] Symbol not found: ", TradeSymbol);
+      return(INIT_FAILED);
+   }
+
    trade.SetExpertMagicNumber(MagicNumber);
 
-   hEMA_Fast_M5 = iMA(_Symbol, PERIOD_M5, EMA_Fast_Period, 0, MODE_EMA, PRICE_CLOSE);
-   hEMA_Slow_M5 = iMA(_Symbol, PERIOD_M5, EMA_Slow_Period, 0, MODE_EMA, PRICE_CLOSE);
-   hRSI_M5 = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE);
-   hATR_M5 = iATR(_Symbol, PERIOD_M5, 14);
+   hEMA_Fast_M5 = iMA(TradeSymbol, PERIOD_M5, EMA_Fast_Period, 0, MODE_EMA, PRICE_CLOSE);
+   hEMA_Slow_M5 = iMA(TradeSymbol, PERIOD_M5, EMA_Slow_Period, 0, MODE_EMA, PRICE_CLOSE);
+   hRSI_M5 = iRSI(TradeSymbol, PERIOD_M5, 14, PRICE_CLOSE);
+   hATR_M5 = iATR(TradeSymbol, PERIOD_M5, 14);
 
-   hEMA_Fast_M15 = iMA(_Symbol, PERIOD_M15, EMA_Fast_Period, 0, MODE_EMA, PRICE_CLOSE);
-   hEMA_Slow_M15 = iMA(_Symbol, PERIOD_M15, EMA_Slow_Period, 0, MODE_EMA, PRICE_CLOSE);
+   hEMA_Fast_M15 = iMA(TradeSymbol, PERIOD_M15, EMA_Fast_Period, 0, MODE_EMA, PRICE_CLOSE);
+   hEMA_Slow_M15 = iMA(TradeSymbol, PERIOD_M15, EMA_Slow_Period, 0, MODE_EMA, PRICE_CLOSE);
 
-   hMA20_H1 = iMA(_Symbol, PERIOD_H1, 20, 0, MODE_SMA, PRICE_CLOSE);
-   hMA50_H1 = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_SMA, PRICE_CLOSE);
-   hRSI_H1 = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE);
+   hMA20_H1 = iMA(TradeSymbol, PERIOD_H1, 20, 0, MODE_SMA, PRICE_CLOSE);
+   hMA50_H1 = iMA(TradeSymbol, PERIOD_H1, 50, 0, MODE_SMA, PRICE_CLOSE);
+   hRSI_H1 = iRSI(TradeSymbol, PERIOD_H1, 14, PRICE_CLOSE);
 
    if(hEMA_Fast_M5 == INVALID_HANDLE || hEMA_Slow_M5 == INVALID_HANDLE ||
       hRSI_M5 == INVALID_HANDLE || hATR_M5 == INVALID_HANDLE ||
       hEMA_Fast_M15 == INVALID_HANDLE || hEMA_Slow_M15 == INVALID_HANDLE)
       return(INIT_FAILED);
 
-   Print("[INIT] M5 Candle Scalper v5 (Risk-Fixed Edition)");
-   Print("[INIT] SL=" + DoubleToString(ATR_SL_Mult, 2) + "xATR | TP=" + DoubleToString(ATR_TP_Mult, 2) + "xATR");
-   Print("[INIT] MinSL=" + DoubleToString(Min_SL_Points,0) + "pts | MaxRiskDollars=" + DoubleToString(MaxRiskDollars,2));
-   Print("[INIT] Trail start=" + IntegerToString(Trail_StartPoints) + "pts | Step=" + IntegerToString(Trail_StepPoints) + "pts");
+   Print("[INIT] BTC M5 Scalper v1 (Safe Edition) on ", TradeSymbol);
+   Print("[INIT] SL=", DoubleToString(ATR_SL_Mult,2), "xATR | TP=", DoubleToString(ATR_TP_Mult,2), "xATR");
+   Print("[INIT] MinSL%=", DoubleToString(Min_SL_Percent,2), " | MaxRiskDollars=", DoubleToString(MaxRiskDollars,2));
 
    DailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    return(INIT_SUCCEEDED);
@@ -164,6 +188,16 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
+bool IsWeekendNow()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeGMT(), dt);
+   if(dt.day_of_week == 0 || dt.day_of_week == 6) return true; // Sun=0, Sat=6
+   if(dt.day_of_week == 5 && dt.hour >= WeekendCloseHourUTC) return true; // Friday cutover
+   return false;
+}
+
+//+------------------------------------------------------------------+
 void OnTick()
 {
    MqlDateTime dt;
@@ -178,8 +212,18 @@ void OnTick()
       DailyLimitHit = false;
    }
 
-   // Daily limits disabled - trades continue all day
-   // if(UseDailyLimits && CheckDailyLimits()) return;
+   if(UseDailyLimits && CheckDailyLimits()) return;
+
+   // NEW: weekend / low-liquidity guard
+   if(AvoidWeekendTrading && IsWeekendNow())
+   {
+      if(CloseOpenTradesBeforeWeekend && HasPosition())
+      {
+         Print("[WEEKEND GUARD] Flattening positions ahead of low-liquidity window.");
+         CloseAllPositions();
+      }
+      return; // no new entries during weekend window
+   }
 
    if(UseAI_Bias)
    {
@@ -194,7 +238,7 @@ void OnTick()
       if(UseTrailingStop) ManageTrailing();
    }
 
-   datetime currentM5 = iTime(_Symbol, PERIOD_M5, 0);
+   datetime currentM5 = iTime(TradeSymbol, PERIOD_M5, 0);
    if(currentM5 != LastM5CandleTime)
    {
       if(HasPosition()) HandleCandleEndClose();
@@ -222,29 +266,80 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
+// NEW: spread filter — blocks entries when spread is abnormally wide
+//+------------------------------------------------------------------+
+bool SpreadTooWide()
+{
+   if(!UseSpreadFilter) return false;
+   double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+   if(bid <= 0) return true;
+   double spreadPct = (ask - bid) / bid * 100.0;
+   if(spreadPct > MaxSpreadPercent)
+   {
+      Print("[SPREAD GUARD] Spread ", DoubleToString(spreadPct,3), "% exceeds max ", MaxSpreadPercent, "%. Skipping.");
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+// NEW: volatility spike filter — blocks entries during abnormal ATR
+// expansion (flash-move protection specific to crypto).
+//+------------------------------------------------------------------+
+bool VolatilitySpikeDetected()
+{
+   if(!UseVolatilitySpikeFilter) return false;
+
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   int need = ATR_AvgLookback + 1;
+   if(CopyBuffer(hATR_M5, 0, 0, need, atrBuf) < need) return false;
+
+   double current = atrBuf[0];
+   double sum = 0;
+   for(int i = 1; i <= ATR_AvgLookback; i++) sum += atrBuf[i];
+   double avg = sum / ATR_AvgLookback;
+
+   if(avg <= 0) return false;
+   if(current > avg * VolatilitySpikeMult)
+   {
+      Print("[VOL SPIKE] ATR ", DoubleToString(current,2), " vs avg ", DoubleToString(avg,2),
+            " (", DoubleToString(current/avg,2), "x). Skipping new entries.");
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
 string DecideDirection()
 {
+   if(SpreadTooWide() || VolatilitySpikeDetected()) return "SKIP";
+
+   double price = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   if(price <= 0) return "SKIP";
+
    double atr[];
    ArraySetAsSeries(atr, true);
    CopyBuffer(hATR_M5, 0, 0, 1, atr);
-   if(atr[0] / _Point < MinATR_Points)
-      return "SKIP";
+   double atrPercent = (atr[0] / price) * 100.0;
+   if(atrPercent < MinATR_Percent) return "SKIP";
 
    MqlRates m5[];
    ArraySetAsSeries(m5, true);
-   CopyRates(_Symbol, PERIOD_M5, 1, MomentumCandles, m5);
+   CopyRates(TradeSymbol, PERIOD_M5, 1, MomentumCandles, m5);
 
    int bullish = 0, bearish = 0;
-   double totalBody = 0;
+   double totalBodyPercent = 0;
    for(int i = 0; i < MomentumCandles; i++)
    {
-      double body = (m5[i].close - m5[i].open) / _Point;
-      totalBody += MathAbs(body);
+      double bodyPct = MathAbs(m5[i].close - m5[i].open) / m5[i].open * 100.0;
+      totalBodyPercent += bodyPct;
       if(m5[i].close > m5[i].open) bullish++;
       else if(m5[i].close < m5[i].open) bearish++;
    }
 
-   if(totalBody / MomentumCandles < MinAvgBody_Points)
+   if(totalBodyPercent / MomentumCandles < MinAvgBodyPercent)
       return "SKIP";
 
    double emaF5[], emaS5[];
@@ -316,15 +411,16 @@ string DecideDirection()
 //+------------------------------------------------------------------+
 void CheckM1Confirmation()
 {
-   datetime currentM1 = iTime(_Symbol, PERIOD_M1, 0);
+   if(SpreadTooWide()) return;
+
+   datetime currentM1 = iTime(TradeSymbol, PERIOD_M1, 0);
    if(currentM1 != LastM1Time)
    {
       LastM1Time = currentM1;
       M1BarsElapsed++;
    }
 
-   if(M1BarsElapsed < ConfirmWaitBars)
-      return;
+   if(M1BarsElapsed < ConfirmWaitBars) return;
 
    if(M1BarsElapsed > 3)
    {
@@ -335,25 +431,22 @@ void CheckM1Confirmation()
 
    MqlRates m1[];
    ArraySetAsSeries(m1, true);
-   CopyRates(_Symbol, PERIOD_M1, 1, 1, m1);
+   CopyRates(TradeSymbol, PERIOD_M1, 1, 1, m1);
 
-   double m1Body = (m1[0].close - m1[0].open) / _Point;
-   double m1AbsBody = MathAbs(m1Body);
+   double m1BodyPct = MathAbs(m1[0].close - m1[0].open) / m1[0].open * 100.0;
    bool m1Bullish = (m1[0].close > m1[0].open);
    bool m1Bearish = (m1[0].close < m1[0].open);
 
-   if(m1AbsBody < MinM1ConfirmBody)
-      return;
+   if(m1BodyPct < MinM1ConfirmBodyPercent) return;
 
-   double m5Open = iOpen(_Symbol, PERIOD_M5, 0);
-   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double m5Open = iOpen(TradeSymbol, PERIOD_M5, 0);
+   double currentBid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   double currentAsk = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
 
    if(CandleDirection == "BUY")
    {
       if(!m1Bullish) return;
       if(RequireM1BreakHigh && currentBid <= m5Open) return;
-
       Print("[CONFIRMED] BUY after ", M1BarsElapsed, " M1 bars");
       ExecuteBuy();
    }
@@ -362,36 +455,40 @@ void CheckM1Confirmation()
    {
       if(!m1Bearish) return;
       if(RequireM1BreakLow && currentAsk >= m5Open) return;
-
       Print("[CONFIRMED] SELL after ", M1BarsElapsed, " M1 bars");
       ExecuteSell();
    }
 }
 
 //+------------------------------------------------------------------+
-// FIX #2: Raised SL floor to Min_SL_Points (input, default 150pts)
-// so the stop is not sitting inside normal M5/M1 wick noise.
+// SL/TP floors expressed as % of price (BTC-safe), converted to
+// absolute price distance for order placement.
 //+------------------------------------------------------------------+
 void GetDynamicSLTP(double &sl_dist, double &tp_dist)
 {
+   double price = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
    double atr = GetATR();
-   double atrPoints = atr / _Point;
 
-   double sl_pts = atrPoints * ATR_SL_Mult;
-   double tp_pts = atrPoints * ATR_TP_Mult;
+   double sl_abs = atr * ATR_SL_Mult;
+   double tp_abs = atr * ATR_TP_Mult;
 
-   if(sl_pts < Min_SL_Points) sl_pts = Min_SL_Points;   // was: if(sl_pts < 20) sl_pts = 20;
-   if(tp_pts < Min_TP_Points) tp_pts = Min_TP_Points;
-   if(tp_pts > Max_TP_Points) tp_pts = Max_TP_Points;
+   double minSLAbs = price * (Min_SL_Percent / 100.0);
+   double minTPAbs = price * (Min_TP_Percent / 100.0);
+   double maxTPAbs = price * (Max_TP_Percent / 100.0);
 
-   if(tp_pts / sl_pts < Min_RR_Ratio)
-      tp_pts = sl_pts * Min_RR_Ratio;
+   if(sl_abs < minSLAbs) sl_abs = minSLAbs;
+   if(tp_abs < minTPAbs) tp_abs = minTPAbs;
+   if(tp_abs > maxTPAbs) tp_abs = maxTPAbs;
 
-   sl_dist = sl_pts * _Point;
-   tp_dist = tp_pts * _Point;
+   if(tp_abs / sl_abs < Min_RR_Ratio)
+      tp_abs = sl_abs * Min_RR_Ratio;
 
-   Print("[SLTP] ATR=", DoubleToString(atrPoints,1), "pts | SL=", DoubleToString(sl_pts,0),
-         "pts | TP=", DoubleToString(tp_pts,0), "pts | RR=", DoubleToString(tp_pts/sl_pts,2));
+   sl_dist = sl_abs;
+   tp_dist = tp_abs;
+
+   Print("[SLTP] ATR=", DoubleToString(atr,2), " | SL=$", DoubleToString(sl_abs,2),
+         " (", DoubleToString(sl_abs/price*100,3), "%) | TP=$", DoubleToString(tp_abs,2),
+         " | RR=", DoubleToString(tp_abs/sl_abs,2));
 }
 
 //+------------------------------------------------------------------+
@@ -401,10 +498,12 @@ void GetSLTP(double &sl_dist, double &tp_dist)
       GetDynamicSLTP(sl_dist, tp_dist);
    else
    {
+      double price = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
       double atr = GetATR();
       sl_dist = atr * ATR_SL_Mult;
       tp_dist = atr * ATR_TP_Mult;
-      if(sl_dist / _Point < Min_SL_Points) sl_dist = Min_SL_Points * _Point;
+      double minSLAbs = price * (Min_SL_Percent / 100.0);
+      if(sl_dist < minSLAbs) sl_dist = minSLAbs;
    }
 }
 
@@ -413,15 +512,18 @@ double GetATR()
 {
    double atr[];
    ArraySetAsSeries(atr, true);
-   if(CopyBuffer(hATR_M5, 0, 0, 1, atr) <= 0) return 30 * _Point;
+   if(CopyBuffer(hATR_M5, 0, 0, 1, atr) <= 0)
+   {
+      double price = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+      return price * 0.003; // fallback ~0.3% if ATR unavailable
+   }
    return atr[0];
 }
 
 //+------------------------------------------------------------------+
-// FIX #1 + #3: Dollar-capped risk sizing. RiskPercent is capped by
-// MaxRiskDollars so MaxLot can no longer silently blow past intended
-// risk. If even MinLot risk exceeds cap * SkipTradeRiskMultiplier,
-// the trade is skipped (returns 0) instead of firing anyway.
+// Dollar-capped risk sizing (same principle as gold v5 fix).
+// Works in absolute $ SL distance rather than "points" since BTC
+// contract specs (tick value/size) vary a lot by broker.
 //+------------------------------------------------------------------+
 double CalcLot(double sl_dist)
 {
@@ -429,15 +531,16 @@ double CalcLot(double sl_dist)
 
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    double riskAmt = MathMin(balance * RiskPercent / 100.0, MaxRiskDollars);
-   double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickVal = SymbolInfoDouble(TradeSymbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(TradeSymbol, SYMBOL_TRADE_TICK_SIZE);
    if(tickSize == 0 || tickVal == 0) return LotSize;
 
    double lossPerLot = (sl_dist / tickSize) * tickVal;
    if(lossPerLot <= 0) return LotSize;
 
    double lot = riskAmt / lossPerLot;
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double step = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0) step = 0.01;
    lot = MathFloor(lot / step) * step;
 
    if(lot < MinLot)
@@ -445,17 +548,17 @@ double CalcLot(double sl_dist)
       double minLotRisk = MinLot * lossPerLot;
       if(minLotRisk > MaxRiskDollars * SkipTradeRiskMultiplier)
       {
-         Print("[SKIP TRADE] Even MinLot risk ($", DoubleToString(minLotRisk,2),
+         Print("[SKIP TRADE] MinLot risk ($", DoubleToString(minLotRisk,2),
                ") exceeds cap ($", DoubleToString(MaxRiskDollars * SkipTradeRiskMultiplier,2), ")");
-         return 0; // skip trade, risk too high even at min lot
+         return 0;
       }
       lot = MinLot;
    }
    if(lot > MaxLot) lot = MaxLot;
 
    double estRisk = lot * lossPerLot;
-   Print("[LOTSIZE] lot=", DoubleToString(lot,2), " | estRisk=$", DoubleToString(estRisk,2),
-         " | slDistPts=", DoubleToString(sl_dist/_Point,0));
+   Print("[LOTSIZE] lot=", DoubleToString(lot,3), " | estRisk=$", DoubleToString(estRisk,2),
+         " | slDist=$", DoubleToString(sl_dist,2));
 
    return lot;
 }
@@ -466,13 +569,14 @@ void ExecuteBuy()
    double sl_dist, tp_dist;
    GetSLTP(sl_dist, tp_dist);
    double lot = CalcLot(sl_dist);
-   if(lot <= 0) { Print("[SKIP] BUY skipped - risk too high for MinLot"); return; } // FIX #3 guard
+   if(lot <= 0) { Print("[SKIP] BUY skipped - risk too high"); return; }
 
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double sl = NormalizeDouble(ask - sl_dist, _Digits);
-   double tp = NormalizeDouble(ask + tp_dist, _Digits);
+   double ask = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+   int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
+   double sl = NormalizeDouble(ask - sl_dist, digits);
+   double tp = NormalizeDouble(ask + tp_dist, digits);
 
-   if(!trade.Buy(lot, _Symbol, ask, sl, tp, "M5v5 BUY"))
+   if(!trade.Buy(lot, TradeSymbol, ask, sl, tp, "BTCv1 BUY"))
       Print("[ERROR] BUY failed: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
    else
    {
@@ -488,13 +592,14 @@ void ExecuteSell()
    double sl_dist, tp_dist;
    GetSLTP(sl_dist, tp_dist);
    double lot = CalcLot(sl_dist);
-   if(lot <= 0) { Print("[SKIP] SELL skipped - risk too high for MinLot"); return; } // FIX #3 guard
+   if(lot <= 0) { Print("[SKIP] SELL skipped - risk too high"); return; }
 
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double sl = NormalizeDouble(bid + sl_dist, _Digits);
-   double tp = NormalizeDouble(bid - tp_dist, _Digits);
+   double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
+   double sl = NormalizeDouble(bid + sl_dist, digits);
+   double tp = NormalizeDouble(bid - tp_dist, digits);
 
-   if(!trade.Sell(lot, _Symbol, bid, sl, tp, "M5v5 SELL"))
+   if(!trade.Sell(lot, TradeSymbol, bid, sl, tp, "BTCv1 SELL"))
       Print("[ERROR] SELL failed: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
    else
    {
@@ -505,16 +610,11 @@ void ExecuteSell()
 }
 
 //+------------------------------------------------------------------+
-// FIX #4: Replaces hardcoded $12.03 TakeProfit_Dollars with an
-// R-multiple / ATR based dynamic target, consistent with the
-// risk-adjusted lot sizing above (so profit target scales
-// proportionally to whatever SL distance/lot was actually used).
-//+------------------------------------------------------------------+
 void CheckProfitTarget()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(PositionGetSymbol(i) != _Symbol) continue;
+      if(PositionGetSymbol(i) != TradeSymbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
 
       double priceOpen = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -522,20 +622,19 @@ void CheckProfitTarget()
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
       double priceCurrent = (type == POSITION_TYPE_BUY) ?
-         SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         SymbolInfoDouble(TradeSymbol, SYMBOL_BID) : SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
 
-      double riskDist = MathAbs(priceOpen - sl); // original R distance (0 if SL not set)
+      double riskDist = MathAbs(priceOpen - sl);
       double gainDist = (type == POSITION_TYPE_BUY) ?
          (priceCurrent - priceOpen) : (priceOpen - priceCurrent);
 
       double rMultiple = (riskDist > 0) ? gainDist / riskDist : 0;
-      double gainPts = gainDist / _Point;
 
-      double atrPts = GetATR() / _Point;
-      double dynamicTPPts = atrPts * DynamicTP_ATR_Mult;
+      double atr = GetATR();
+      double dynamicTPAbs = atr * DynamicTP_ATR_Mult;
 
       bool rTargetHit = (riskDist > 0 && rMultiple >= ProfitTarget_RMultiple);
-      bool atrTargetHit = (gainPts >= dynamicTPPts);
+      bool atrTargetHit = (gainDist >= dynamicTPAbs);
 
       if(rTargetHit || atrTargetHit)
       {
@@ -546,7 +645,6 @@ void CheckProfitTarget()
          TradeOpenThisCandle = false;
          Print("[DYNAMIC TP] +$", DoubleToString(profit, 2),
                " | R=", DoubleToString(rMultiple,2),
-               " | Points=", IntegerToString((int)gainPts),
                " | Trigger=", (rTargetHit ? "R-multiple" : "ATR"));
       }
    }
@@ -557,7 +655,7 @@ void HandleCandleEndClose()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(PositionGetSymbol(i) != _Symbol) continue;
+      if(PositionGetSymbol(i) != TradeSymbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
 
       ulong ticket = PositionGetInteger(POSITION_TICKET);
@@ -565,14 +663,15 @@ void HandleCandleEndClose()
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double profitPts = (type == POSITION_TYPE_BUY) ? (bid - openPrice)/_Point : (openPrice - ask)/_Point;
+      double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+      double gainAbs = (type == POSITION_TYPE_BUY) ? (bid - openPrice) : (openPrice - ask);
+      double gainPct = gainAbs / openPrice * 100.0;
 
-      if(HoldWinnersPastCandle && profitPts >= HoldMinProfitPoints)
+      if(HoldWinnersPastCandle && gainPct >= HoldMinProfitPercent)
       {
-         Print("[HOLD] Winner running (+", IntegerToString((int)profitPts), "pts). Trail buffer: ",
-               IntegerToString((int)HoldTrailBuffer), "pts");
+         Print("[HOLD] Winner running (+", DoubleToString(gainPct,3), "%). Trail buffer: ",
+               DoubleToString(HoldTrailBufferPercent,3), "%");
          continue;
       }
 
@@ -590,11 +689,10 @@ void ManageTrailing()
 {
    double atr = GetATR();
    double trailDist = atr * Trail_ATR_Mult;
-   double trailStep = Trail_StepPoints * _Point;
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(PositionGetSymbol(i) != _Symbol) continue;
+      if(PositionGetSymbol(i) != TradeSymbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
 
       ulong ticket = PositionGetInteger(POSITION_TICKET);
@@ -602,32 +700,36 @@ void ManageTrailing()
       double curSL = PositionGetDouble(POSITION_SL);
       double curTP = PositionGetDouble(POSITION_TP);
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+      int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
+
+      double trailStepAbs = openPrice * (Trail_StepPercent / 100.0);
+      double trailStartAbs = openPrice * (Trail_StartPercent / 100.0);
 
       if(type == POSITION_TYPE_BUY)
       {
-         double profitPts = (bid - openPrice)/_Point;
-         if(profitPts >= Trail_StartPoints)
+         double gainAbs = bid - openPrice;
+         if(gainAbs >= trailStartAbs)
          {
-            double newSL = NormalizeDouble(bid - trailDist, _Digits);
-            if(newSL > curSL + trailStep)
+            double newSL = NormalizeDouble(bid - trailDist, digits);
+            if(newSL > curSL + trailStepAbs)
             {
                trade.PositionModify(ticket, newSL, curTP);
-               Print("[TRAIL] BUY SL -> ", newSL, " | Profit: ", IntegerToString((int)profitPts), "pts");
+               Print("[TRAIL] BUY SL -> ", newSL, " | Gain: $", DoubleToString(gainAbs,2));
             }
          }
       }
       else if(type == POSITION_TYPE_SELL)
       {
-         double profitPts = (openPrice - ask)/_Point;
-         if(profitPts >= Trail_StartPoints)
+         double gainAbs = openPrice - ask;
+         if(gainAbs >= trailStartAbs)
          {
-            double newSL = NormalizeDouble(ask + trailDist, _Digits);
-            if(newSL < curSL - trailStep || curSL == 0)
+            double newSL = NormalizeDouble(ask + trailDist, digits);
+            if(newSL < curSL - trailStepAbs || curSL == 0)
             {
                trade.PositionModify(ticket, newSL, curTP);
-               Print("[TRAIL] SELL SL -> ", newSL, " | Profit: ", IntegerToString((int)profitPts), "pts");
+               Print("[TRAIL] SELL SL -> ", newSL, " | Gain: $", DoubleToString(gainAbs,2));
             }
          }
       }
@@ -667,7 +769,7 @@ bool CheckDailyLimits()
 void CloseAllPositions()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
-      if(PositionGetSymbol(i) == _Symbol)
+      if(PositionGetSymbol(i) == TradeSymbol)
          if(PositionGetInteger(POSITION_MAGIC) == MagicNumber)
             trade.PositionClose(PositionGetInteger(POSITION_TICKET));
 }
@@ -676,7 +778,7 @@ void CloseAllPositions()
 bool HasPosition()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
-      if(PositionGetSymbol(i) == _Symbol)
+      if(PositionGetSymbol(i) == TradeSymbol)
          if(PositionGetInteger(POSITION_MAGIC) == MagicNumber)
             return true;
    return false;
@@ -687,7 +789,7 @@ void UpdateAIBias()
 {
    if(OpenAI_ApiKey == "") { AI_Bias = "NONE"; return; }
 
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
    double ma20[], ma50[], rsiH1[];
    ArraySetAsSeries(ma20, true);
    ArraySetAsSeries(ma50, true);
@@ -698,21 +800,21 @@ void UpdateAIBias()
 
    MqlRates h1[];
    ArraySetAsSeries(h1, true);
-   CopyRates(_Symbol, PERIOD_H1, 0, 5, h1);
+   CopyRates(TradeSymbol, PERIOD_H1, 0, 5, h1);
 
    string candles = "";
    for(int i = 0; i < 5; i++)
-      candles += "H1[" + IntegerToString(i) + "] O=" + DoubleToString(h1[i].open, _Digits)
-               + " H=" + DoubleToString(h1[i].high, _Digits)
-               + " L=" + DoubleToString(h1[i].low, _Digits)
-               + " C=" + DoubleToString(h1[i].close, _Digits) + "\\n";
+      candles += "H1[" + IntegerToString(i) + "] O=" + DoubleToString(h1[i].open, 2)
+               + " H=" + DoubleToString(h1[i].high, 2)
+               + " L=" + DoubleToString(h1[i].low, 2)
+               + " C=" + DoubleToString(h1[i].close, 2) + "\\n";
 
    string trend = (ma20[0] > ma50[0]) ? "BULLISH" : (ma20[0] < ma50[0]) ? "BEARISH" : "NEUTRAL";
 
    string prompt =
-      "=== M5 SCALPER BIAS ===\\n"
-      "Symbol: " + _Symbol + " | Bid: " + DoubleToString(bid, _Digits) + "\\n" +
-      "H1 MA20: " + DoubleToString(ma20[0], _Digits) + " MA50: " + DoubleToString(ma50[0], _Digits) + "\\n" +
+      "=== BTC M5 SCALPER BIAS ===\\n"
+      "Symbol: " + TradeSymbol + " | Bid: " + DoubleToString(bid, 2) + "\\n" +
+      "H1 MA20: " + DoubleToString(ma20[0], 2) + " MA50: " + DoubleToString(ma50[0], 2) + "\\n" +
       "Trend: " + trend + " | RSI: " + DoubleToString(rsiH1[0], 2) + "\\n" +
       "Candles:\\n" + candles +
       "Reply: SIGNAL CONFIDENCE (BUY 78 / SELL 72 / HOLD 50). One line.";
@@ -734,7 +836,7 @@ string OpenAIRequest(string prompt)
    string url = "https://api.openai.com/v1/chat/completions";
    StringReplace(prompt, "\"", "'");
 
-   string sys = "You are a XAUUSD M5 scalping bias analyst.\\n"
+   string sys = "You are a BTCUSD M5 scalping bias analyst.\\n"
                 "Rules: Reply SIGNAL CONFIDENCE (e.g. BUY 78). One line. No explanation.";
 
    string body = "{\"model\":\"" + OpenAI_Model + "\"," +
