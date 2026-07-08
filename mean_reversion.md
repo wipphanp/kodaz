@@ -1,3 +1,5 @@
+
+
 Yes — I can add that logic, but the version I just prepared should be treated as a **draft**, because I have only verified that the new inputs were inserted and not that the mean-reversion block landed correctly inside `CheckM1Confirmation()`. 
 
 ## Proposed behavior
@@ -31,7 +33,7 @@ Reply with one of these so I build the exact variant you want:
 - `Both above 75 and below 25 mean reversion`
 - `Add reversal candle confirmation too`
 
-==========================================================================================================================================
+===================================================================================================================================================================
 
 Done — I created a new EA based on your attached `YX_5minCandle_scalp_v5_M1RSI_Filter_ClosedCandle.mq5` with mean-reversion entry logic for both BUY and SELL, and I added detailed inline comments inside `CheckM1Confirmation()` explaining the implementation. 
 
@@ -125,4 +127,54 @@ For your current EA, I would call it advantageous **only if**:
 - you are comfortable with the reversal branch having priority over the standard confirmation path. 
 
 If you want the cleaner architecture, I’d recommend changing the logic from “mean reversion executes first” to “mean reversion executes only when `CandleDirection == "SKIP"` or momentum confirmation fails,” which reduces direct conflict between the two styles. [ppl-ai-file-upload.s3.amazonaws]
-==========================================================================================================================================
+===================================================================================================================================================================
+
+All design questions resolved. Here's the complete, consolidated logic — please review before I write any code.
+
+## Final spec
+
+**Per-candle counter** `TradesThisCandle` resets to 0 at the start of every new M5 candle.
+
+**Trades 1–5** (sequential — each must close before the next fires):
+| Trade # | Direction | Lot |
+|---|---|---|
+| 1 | original | 0.27 |
+| 2 | original | 0.26 |
+| 3 | original | 0.25 |
+| 4 | original | 0.24 |
+| 5 | original | 0.23 |
+
+No hedge protection on these — they run under your existing SL/trailing/breakeven logic only, unchanged.
+
+**Trade 6+** (still same direction, still sequential):
+- Lot continues decrementing: 0.22, then **floors at 0.20** and holds steady for all further trades in that candle.
+- **New rule, only for trade 6+:** if that specific trade's floating loss exceeds **-$20**, open an **equal-lot opposite-direction hedge** (true freeze, not the mismatched-lot version from your v9 file).
+- The hedged pair closes together once their **combined P&L turns positive** (same basket pattern as v9's recovery system — I'll reuse `LossRecovery_CloseInProfit` or add a dedicated threshold for this ladder, your call).
+- **Once a hedge fires, the ladder ends for that candle** — no trade 7+ attempts, even after the basket eventually closes.
+
+**Re-entry condition** for every trade in the ladder (1 through however far it gets): the same trend/EMA/volume/candle-body checks must still confirm the original direction before firing the next trade.
+
+**v9's existing loss-recovery system** (-$50 trigger, independent per-position) stays active and runs alongside this, untouched — it can still fire on any individual ladder trade that reaches -$50 before the ladder's own logic reacts to it.
+
+## Improvements worth adopting (not yet decided by you)
+
+1. **Add a per-candle hard stop regardless of ladder state** — e.g., if cumulative realized loss for the candle (sum of all closed ladder trades' P&L so far) exceeds some ceiling, stop the ladder even before trade 6, rather than only capping via the trade-count threshold. Right now nothing stops trades 1–5 from each losing independently before the count-based logic ever engages.
+2. **Give the re-entry condition a minimum "cool-off"** between trades (e.g., require at least one fresh M1 close) so the ladder can't rapid-fire multiple entries off stale signal state within the same tick.
+3. **Log/report the effective ladder outcome per candle** (total realized P&L across all its trades) separately from other trades, so you can actually evaluate whether the ladder is net-helping or net-hurting once you've run it live/demo for a while — right now nothing distinguishes "ladder P&L" from ordinary single-shot trades in your stats.
+
+Want me to include improvements 1–3, or build exactly the spec above with nothing added? Once you confirm, I'll write the code.
+
+Yes. In ladder I am r should each new entry only fire after the previous one in that candle has already closed. so at 6th entry there will be no previous one. only one entry exist in the candle at anypoint of time till the 6th entry this should go along existing v9 loss-recovery system. Write the complete EA in one file and give the new file name
+
+YX_M5_scalper_v10_ladder.mq5 — built on your v9 file, matching everything we confirmed:
+
+Trade #1 per candle: completely untouched, same DecideDirection()/CheckM1Confirmation() flow as always.
+Trades 2–5+: fire only after the previous one fully closes, same direction, lot ladder 0.27 → 0.26 → 0.25 → 0.24 → 0.23 → 0.22 → 0.21 → floors at 0.20 and holds.
+Gated by trend alignment (reusing GetTrendAlignmentScore), volume vs. its average, EMA distance in ATR terms, and candle body size — all new tunable inputs.
+Trade 6+ only: if that specific trade's loss exceeds -$20, opens an equal-lot opposite-direction hedge (true freeze). Basket closes both legs together once combined P&L hits the profit target. Ladder ends for that candle the moment this fires — no trade 7+ attempts.
+v9's -$50 loss-recovery system runs untouched, alongside, on every position including ladder trades.
+New LADDER_HEDGE_-tagged legs are excluded from the normal exit functions and from v9's recovery trigger (same pattern as v9's own RECOVERY_ legs) — necessary so the hedge basket isn't torn apart by unrelated exit logic before it reaches its own profit target.
+
+All inputs default UseLadder = false, so nothing changes unless you turn it on.
+One thing to actually test before trusting this: I inferred your intended re-entry gating (trend/volume/EMA-distance/body) from your original request, but I picked the specific thresholds and combination logic myself — none of that was in your final confirmed spec. Worth running this on demo and watching the [LADDER] log lines to see how often re-entries actually fire and whether those default gates feel too strict or too loose before using it live
+===================================================================================================================================================================
