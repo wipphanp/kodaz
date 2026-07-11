@@ -178,3 +178,238 @@ New LADDER_HEDGE_-tagged legs are excluded from the normal exit functions and fr
 All inputs default UseLadder = false, so nothing changes unless you turn it on.
 One thing to actually test before trusting this: I inferred your intended re-entry gating (trend/volume/EMA-distance/body) from your original request, but I picked the specific thresholds and combination logic myself — none of that was in your final confirmed spec. Worth running this on demo and watching the [LADDER] log lines to see how often re-entries actually fire and whether those default gates feel too strict or too loose before using it live
 ===================================================================================================================================================================
+V7 Enhancementa
+
+I compared both files fully. No code changes made — here's the analysis for your review.
+
+## Where v7 stands today (relative to v13)
+
+v7 is essentially the **pre-fix baseline** — it has all three problems we already diagnosed and fixed in v12/v13, unchanged:
+
+| Issue | v7 | v13 |
+|---|---|---|
+| Breakeven distance | Fixed points only (`BreakEven_TriggerPoints=15`, `BreakEven_LockPoints=5`) | ATR-relative, with those as floors |
+| Mean-reversion direction | Fires regardless of `CandleDirection` — can contradict the trend bias | Gated by `MeanRev_Mode` (default: only fires on true `SKIP`/no-trend candles) |
+| Mean-reversion "stretch" confirmation | None — RSI-extreme alone triggers it | Requires price ≥0.8×ATR from `EMA_Fast_M5` |
+| Mean-reversion SL/TP | Shares `GetSLTP()` with trend trades (wide 1503pt SL, ATR×3 TP) | Dedicated ATR-relative SL/TP sized for a quick reversion move |
+
+Since v7 → v13 is essentially the same lineage of code (same `DecideDirection()`, same `CheckM1Confirmation()` structure, same `GetSLTP()`/`ExecuteBuy()`/`ExecuteSell()` shape), these are direct, low-risk ports — not rewrites.
+
+## Recommended priority order
+
+**1. ATR-relative breakeven (highest priority, lowest risk)**
+This is the exact "5-point SL is too tight" issue from our first conversation — v7 still has it. Porting `UseATR_BreakEven`, `BreakEven_TriggerATR_Mult`, `BreakEven_LockATR_Mult` into `ManageTrailing()` is a self-contained, mechanical change with a safe default (floors preserve old behavior on quiet days).
+
+**2. Mean-reversion direction fix (`MeanRev_Mode`)**
+v7's mean reversion can silently fire opposite the trend bias on every single trade — this is arguably a bigger correctness issue than the breakeven one, since it means the EA can hold conflicting theses within the same candle. Porting `MeanRevDirectionAllowed()` + the `OnTick()` gating change would fix that.
+
+**3. EMA-extension filter for mean reversion**
+Cheap addition once #2 is in place — stops RSI-extreme-but-not-actually-stretched setups from qualifying.
+
+**4. Dedicated mean-reversion SL/TP**
+Depends on #2 first (no point giving a contradicting trade its own better SL/TP). Once mean reversion is a genuine, isolated regime, giving it its own tighter ATR-relative exits (vs. the shared 1503pt/ATR×3 profile) should meaningfully improve its risk/reward.
+
+## One thing *not* from v13, but worth flagging while I'm looking at v7
+
+`CheckProfitTarget()` in v7 has **two exits firing simultaneously and unconditionally**: a hardcoded `$12.03` fixed-dollar close, and a separate `ATR × 2.0` points-based close — both always active, whichever hits first wins. This dual-exit-always-on pattern is exactly what got flagged and gated behind `UseLegacySecondaryTP` (default false) further along your version history — v7 predates that fix. It's not something v13 does differently in a way you'd "port" line-for-line, but worth knowing it's a live inefficiency in v7 specifically.
+
+## Not recommending (out of scope / bigger surface area)
+
+v13 also carries a **ladder re-entry system** and **loss-recovery subsystem** that v7 doesn't have. These are substantial, separate features rather than "efficiency fixes" — I'd treat porting those as its own decision/project, not bundled into this cleanup.
+
+---
+
+Let me know which of #1–4 (and optionally the `CheckProfitTarget` note) you want implemented, and I'll build it as a new EA off of v7, same pattern as before — only the agreed changes, nothing else touched.
+
+implement #1, the ATR-relative breakeven (highest priority, lowest risk) , #2. the Mean-reversion direction fix (MeanRev_Mode), #4,the  Dedicated mean-reversion SL/TP and reanme the new EA as  FX_M5_Scalp_v1 . ask me any doubts if you have in middle
+
+===================================================================================================================================================================
+
+I can point out structural inefficiencies I can see in the code, but I want to be upfront: I can't guarantee any of this increases profit — market behavior decides that, not architecture. What I *can* do is flag places where the code's own logic works against itself. Here's what stands out, ranked by how much I'd expect them to matter.
+
+## 1. Lot sizing doesn't account for the new SL variability (highest priority)
+
+This is the big one, and it's a direct side-effect of the changes we just made. `CalcLot()` ignores the `sl_dist` parameter entirely and always returns a fixed `0.27` lots:
+
+```
+double CalcLot(double sl_dist)
+{
+   double lot = Fixed_Entry_Lot;   // sl_dist is passed in but never used
+   ...
+}
+```
+
+Before FX_M5_Scalp_v1, this was at least *consistent* — every trade had the same SL distance (1503pts), so a fixed lot meant fixed dollar-risk-per-trade too. Now that mean-reversion trades have their own SL (~15–100pts, clamped) while momentum trades still use the 1503pt backstop, **the same 0.27 lots represents wildly different dollar risk depending on which branch opened the trade** — a mean-reversion trade risks a fraction of what a momentum trade risks, per lot. That's an unintentional inconsistency the earlier changes introduced.
+
+**Fix direction:** re-enable proportional sizing off `sl_dist` (the `UseRiskSizing`/`RiskPercent` inputs already exist but are dead code in this version) so every trade risks a comparable dollar amount regardless of which branch triggered it.
+
+## 2. The legacy dual-exit in `CheckProfitTarget()` can override the new mean-rev TP
+
+```
+if(profit >= TakeProfit_Dollars) ...        // hardcoded $12.03
+double dynamicTP = GetATR()/_Point * 2.0;
+if(profitPoints >= dynamicTP) ...           // ATR * 2.0, always on
+```
+
+Both of these run unconditionally on every tick, independent of whatever TP `GetSLTP()` actually set. For a mean-reversion trade with a deliberately small TP (20–120pt clamp), this dollar-based and ATR×2-based exit can trigger *before or after* the intended TP in ways that weren't designed together — it can quietly override the very SL/TP profile we just built. This is the same "legacy secondary TP" issue that showed up earlier in the v9→v11 lineage and got gated behind a toggle there; v7/FX_M5_Scalp_v1 predates that fix.
+
+## 3. `HoldMinProfitPoints` (20) sits inside the new mean-rev TP range
+
+`HandleCandleEndClose()` force-closes any trade that isn't already up ≥20pts by candle end. That threshold was tuned when every trade shared the same wide TP. Now that mean-reversion TPs can be as low as 20pts (the floor) and as high as 120pts, a lot of mean-reversion trades could get force-closed at candle-end right as they're approaching their own TP, never given the chance to actually reach it — the "hold winners" logic and the "smaller reversion targets" logic aren't currently talking to each other.
+
+## 4. No spread awareness anywhere
+
+Neither the original breakeven distances nor the new mean-reversion SL floor (15pts) account for live spread. On a symbol/session where spread eats a meaningful chunk of 15–20 points, that floor may leave close to zero real room. A simple spread check (skip entry, or widen the floor, if spread exceeds some fraction of the intended SL) would protect the smaller mean-reversion trades specifically, since they're the ones now operating in a tighter numeric range.
+
+## Lower priority, worth knowing about
+- No session/time-of-day filter — the EA trades all day regardless of liquidity conditions.
+- Entry thresholds (`RSI_BuyAbove=51`, `RSI_SellBelow=47`) are quite loose — barely off the 50 midline — so a fair number of momentum entries may be low-conviction.
+
+---
+
+My suggestion: **#1 and #2 first**, since they directly interact with (and partially undermine) the mean-reversion changes we just shipped — #1 makes risk consistent across trade types, #2 stops a legacy exit from silently overriding the new intended TP. #3 and #4 are smaller, more surgical fixes once those two are in.
+
+Want me to implement any of these? Same process as before — I'll only touch what you approve.
+
+===================================================================================================================================================================
+
+
+implement the below in attached EA and comeup with new name FX_M5_Scalp_PPCheck uploaded file type and local source availabilityCheck uploaded file type and local source availabilityThe uploaded file is a compiled .ex5 binary — I can't edit that directly, but the matching .mq5 source is already available in the uploads folder, so I'll use that.Architected progressive profit-lock trails and continuation re-entry mechanicsArchitected progressive profit-lock trails and continuation re-entry mechanicsI'll implement the top two items from my recommendation — the progressive profit-lock trail and continuation re-entry. I'm holding off on partial scale-out (item 3) since I explicitly flagged that one as a bigger, riskier change worth staging separately after these two are validated — happy to add it next if you want it now instead, just let me know.Create new PP working copy from v4Create new PP working copy from v4Let's look at the current ManageTrailing() function fully to plan the progressive-lock integration:Ran 2 commands, viewed a fileRan 2 commands, viewed a fileNow let's add the progressive profit-lock inputs right after the trailing stop block:Add progressive profit-lock inputs after trailing stop blockAdd progressive profit-lock inputs after trailing stop blockNow let's implement the progressive trail distance calculation inside ManageTrailing():Add GetProgressiveTrailMult helper and use per-position progressive trail distance in ManageTrailingAdd GetProgressiveTrailMult helper and use per-position progressive trail distance in ManageTrailingNow let's implement continuation re-entry. First, add the global state variable:Ran a command, edited a fileRan a command, edited a fileNow let's view OnTick() in full to integrate the detection logic correctly:Viewed 2 filesViewed 2 filesNow let's add the GetLastDealProfit() helper. First find HasPosition():Ran a command, viewed a file, edited a fileRan a command, viewed a file, edited a fileNow let's wire the detection logic into OnTick() — at the top for detection, and at the bottom for the state update:Add continuation re-entry detection at top of OnTickAdd continuation re-entry detection at top of OnTickNow let's find the end of OnTick() to add the state update:Orchestrated version updates, changelog documentation, and feature loggingOrchestrated version updates, changelog documentation, and feature loggingNow let's verify integrity so far, then finish with header/version/changelog and init logging:Verify balance after core logic changesVerify balance after core logic changesBalanced. Now let's update the header/version and add the changelog:Edited 3 files, ran 2 commandsEdited 3 files, ran 2 commandsNow let's add the OnInit() log lines for the two new features:Add PP-A and PP-B settings log lines in OnInitAdd PP-A and PP-B settings log lines in OnInitNow let's do a final comprehensive verification:Final comprehensive integrity checkFinal comprehensive integrity checkEverything balanced, every function defined exactly once. Let's finalize and deliver:Ran a command, read a fileRan a command, read a fileFX_M5_Scalp_PP created, built on v4. Everything from v1–v4 carries over untouched. Note: you attached the compiled .ex5, which I can't edit directly — I used the matching .mq5 source that was already sitting in your uploads folder and confirmed it was byte-identical to what I had.
+What's implemented (items 1 & 2 from my proposal)
+PP-A — Progressive profit-lock trail. The Stage-2 ATR trail multiplier now tightens as profit grows, instead of staying flat at Trail_ATR_Mult=0.8 the whole time:
+
+Profit ≥ 1×ATR → multiplier tightens to 0.5
+Profit ≥ 2×ATR → multiplier tightens to 0.3
+Below that → unchanged 0.8
+
+This directly targets the Gold pullback problem: a trade that's run further gives back proportionally less on a snapback, because the cushion shrinks as the win grows.
+PP-B — Continuation re-entry. When PP-A's tightened stop gets hit by the broker (which happens between ticks, outside this EA's direct control), OnTick() now detects that specific case — position was open last tick, gone now, and the closing deal was 
+
+rofitable — and immediately re-evaluates the trend and re-arms confirmation tracking so the EA can re-enter in the same candle if conditions still favor continuation. A losing close still waits for the next candle, same as QuickStop already does.
+Not included — as flagged
+Partial scale-out (closing 50% at a profit milestone) wasn't built into this version. I said upfront I'd stage that separately after PP-A/PP-B are validated, since it's a bigger change touching position-sizing bookkeeping — happy to build it as a v6 once you've had a chance to backtest this one.
+Worth watching in backtest
+
+[TRAIL] log lines now show trailMult= — confirm the tiers are firing at sensible ATR multiples for Gold's typical range
+[CONTINUATION] log lines — how often it fires, and whether the same-candle re-entries are net-positive or just adding noise
+Try UseProgressiveProfitLock=false and UseContinuationReentry=false independently against the defaults to isolate which of the two is actually driving any difference in results
+Fx m5 scalp ppMQ5 make the default lot entry size to 0.27 always  and change the name ZX_PP_M5_v1. the entry should always be lotsize=0.27Check for uploaded PP file and compare to localCheck for uploaded PP file and compare to localUsing my local working copy of FX_M5_Scalp_PP.mq5 since it's not re-uploaded. Let's create the new file:Architected fixed lot sizing override and validated parameter constraintsArchitected fixed lot sizing override and validated parameter constraintsNow let's update the UseRiskSizing default to false for clarity (even though it's now ignored by CalcLot()), and update its comment:Viewed a file, edited a fileViewed a file, edited a fileNow let's update the Fixed_Entry_Lot input comment since it's now unconditional:Ran a command, viewed a file, edited a fileRan a command, viewed a file, edited a fileNow let's update the OnInit() log line for lot sizing:Ran a command, viewed a file, edited a fileRan a command, viewed a file, edited a fileNow let's update the header title, version, and add a changelog block:Edited 3 files, ran 2 commandsEdited 3 files, ran 2 commandsNow let's do a final comprehensive integrity check:Final integrity check on ZX_PP_M5_v1Final integrity check on ZX_PP_M5_v1Balanced, all functions unique. Let's do a final review of CalcLot() to confirm it's clean:Ran a command, viewed a fileRan a command, viewed a fileClean. Let's finalize and deliver:Ran a command, read a fileRan a command, read a fileZX_PP_M5_v1 created, built on FX_M5_Scalp_PP. Everything else (ATR-relative breakeven, mean-reversion direction fix, dedicated mean-rev exits, gated legacy TP, RR-linked TP, quick-stop, progressive profit-lock trail, continuation re-entry) carries over completely unchanged.
+What changed
+CalcLot() now unconditionally returns Fixed_Entry_Lot (0.27) for every single entry — momentum or mean-reversion, BUY or SELL — regardless of UseRiskSizing or sl_dist. UseRiskSizing/RiskPercent are left in the input list but are now dead code (default flipped to false for clarity), so switching back to risk-based sizing later is a one-function change if you ever want it.
+Worth flagging clearly, since it's a real tradeoff, not a bug
+This deliberately reintroduces the exact inconsistency v2's risk-based sizing was built to fix: a mean-reversion trade's tight ATR-relative SL (~20–100pts) and a momentum trade's wide 1503pt SL will once again risk very different dollar amounts at the identical 0.27 lots — since dollar risk = lot size × SL distance × point value, and only lot size is fixed now. That's exactly what you asked for, so I've implemented it that way, but wanted to name the consequence explicitly rather than let it slide by silently.Zx pp m5 v1MQ5 cJust to confirm — did you mean to send something more, or was "c" intentional? Happy to help with whatever's next, whether that's tweaking ZX_PP_M5_v1 further, backtesting guidance, or something new.how to fix the below one 
+This deliberately reintroduces the exact inconsistency v2's risk-based sizing was built to fix: a mean-reversion trade's tight ATR-relative SL (~20–100pts) and a momentum trade's wide 1503pt SL will once again risk very different dollar amounts at the identical 0.27 lots — since dollar risk = lot size × SL distance × point value, and only lot size is fixed now. That's exactly what you asked for, so I've implemented it that way, but wanted to name the consequence explicitly rather than let it slide by silently.Weighed trade-off between fixed lots and consistent risk exposureWeighed trade-off between fixed lots and consistent risk exposureGood question — let's be precise about what's actually fixable here, because there's a math constraint you can't get around with a simple tweak.
+Why this can't be fully "fixed" while keeping lot literally always 0.27
+Dollar risk = lot × SL_points × point_value. If lot is locked to one constant, dollar risk is directly proportional to SL distance — full stop. With momentum SL at 1503pts and mean-reversion SL at 20–100pts (up to ~75x tighter), the only way to make dollar risk equal at a single fixed lot is if the SL distances were also equal. They aren't, by design. So "fixed lot + wildly different SL distances + equal dollar risk" are three requirements that can't all be true simultaneously — you have to give up one of them.
+Here are the three real options, in order of how well they preserve "fixed lot":
+Option A — Two-tier fixed lot (closest to what you asked for)
+Instead of one Fixed_Entry_Lot for everything, use two separate constants — one for momentum, one for mean-reversion — hand-picked so their dollar risk roughly matches:
+lot_meanrev ≈ lot_momentum × (SL_momentum / SL_meanrev)
+Both values are still static, pre-set constants — nothing is computed from account balance or live risk percent — so this stays true to "I want a fixed lot," just as two fixed lots instead of one. The catch: because the SL gap is so large (1503 vs ~50 average), true dollar-parity would need the mean-reversion lot to be roughly 30x the momentum lot — likely impractical (margin, broker lot caps). So in practice this gets you closer, not exact parity, without hitting unreasonable lot sizes.
+Option B — Shrink the SL gap itself (fixes the root cause, not just the symptom)
+Rather than compensating for the gap with lot size, reduce it directly: bring Fixed_SL_Points (momentum SL) down from 1503 toward something more comparable to the mean-reversion range — e.g. tie it to ATR too, similar to how the mean-reversion SL already works. If both trade types have SL distances in a similar order of magnitude, a single fixed lot naturally produces similar dollar risk without any lot-size gymnastics. This is arguably the more honest fix, since 1503pts was already flagged as an oversized backstop back when we first started this thread.
+Option C — Restore dynamic risk-based sizing (full fix, but breaks "always 0.27")
+This is what v2 did, and it's the only option that gives exact dollar-risk parity regardless of how different the SL distances are. But it directly contradicts what you asked for last time — lot size would no longer always be 0.27, it would vary per trade.
+My recommendation
+Option B — narrow Fixed_SL_Points toward something ATR-relative or at least much smaller than 1503 — since it fixes the actual cause (an oversized, static momentum SL) rather than papering over it with a second lot constant. Option A is a reasonable fallback if you want to keep the wide momentum SL exactly as-is for other reasons.
+Want me to implement Option A, Option B, or a combination — and if B, do you want Fixed_SL_Points reduced to a smaller flat number, or made ATR-relative like the breakeven/mean-reversion logic already is?as per  you what should be Fixed_SL_Points 
+to avoid the above said inconsistencyReconciled ATR-based formulas to calibrate optimal stop-loss parametersReconciled ATR-based formulas to calibrate optimal stop-loss parametersHere's my reasoning, with the caveat that the "right" number really depends on Gold's live ATR on your broker/session — I don't have real-time data, so treat this as a structured starting point to backtest against, not a precise answer.
+Working from what's already in the code
+The mean-reversion SL is clamp(ATR_pts × 0.7, 15, 100) — so on a typical M5 Gold candle, that's landing somewhere around 40–100pts most of the time (ATR would need to be ~57–140pts for the 0.7 multiplier to land in that range without hitting the floor/ceiling).
+Fixed_SL_Points = 1503 isn't derived from anything — it's a static leftover, and it's roughly 15–30x wider than that mean-reversion range. That's the entire source of the imbalance.
+What I'd target
+Rather than picking one arbitrary number, I'd size the momentum SL to be meaningfully wider than mean-reversion (trend trades reasonably need more room to breathe than a quick reversion bet) but same order of magnitude, not 15–30x apart. A ratio of roughly 2–3x the mean-reversion SL is a defensible gap — enough to reflect "this is a different kind of trade," not so much that dollar risk blows out at a fixed lot.
+Given mean-reversion typically lands ~40–100pts, that points to a momentum SL somewhere in the 150–300pt range, not 1503.
+Two ways to get there
+Static number: Fixed_SL_Points = 200 (roughly 2–4x the mean-reversion range) — simple, but doesn't adapt to Gold's volatility swings between quiet and news-driven sessions, same weakness the old fixed breakeven had before we made that ATR-relative.
+ATR-relative (what I'd actually recommend, for consistency with everything else in the EA): replace the static Fixed_SL_Points with clamp(ATR_pts × 1.2, 80, 250). This keeps momentum SL scaling with live volatility the same way mean-reversion SL, breakeven, and the progressive trail already do — so on a quiet session both SL types shrink together, on a volatile session both widen together, and the ratio between them (roughly 1.2/0.7 ≈ 1.7x) stays proportionate regardless of what ATR is doing that day. This is the more robust option and matches the pattern you've approved everywhere else in this EA.
+One knock-on effect worth knowing
+Fixed_SL_Points also feeds TP_MODE_RR's TP calculation (TP = SL × TP_RiskReward_Ratio). Shrinking SL from 1503 to ~200 means the RR-linked TP shrinks proportionally too — from ~751pts down to ~100pts at the same 0.5 ratio. That's actually more realistic for an M5 Gold scalp than a 751pt target, but it's a second effect you'd want to watch in backtest alongside the risk-parity fix itself.
+
+Want me to implement the ATR-relative version (clamp(ATR_pts × 1.2, 80, 250), tunable via inputs same as everywhere else), the static 200 version, or would you rather see both side by side in backtest before deciding?
+
+
+
+
+ATR-relative (what I'd actually recommend, for consistency with everything else in the EA): replace the static Fixed_SL_Points with clamp(ATR_pts × 1.2, 80, 250). This keeps momentum SL scaling with live volatility the same way mean-reversion SL, breakeven, and the progressive trail already do — so on a quiet session both SL types shrink together, on a volatile session both widen together, and the ratio between them (roughly 1.2/0.7 ≈ 1.7x) stays proportionate regardless of what ATR is doing that day. This is the more robust option and matches the pattern you've approved everywhere else in this EA.
+
+
+
+
+can we improve the trailing stop loss logic to optimize profit loss
+
+
+Ran a command, viewed a file
+Ran a command, viewed a file
+you understand by your self
+
+
+Architected volatility-adaptive trailing stop with partial close strategy
+Architected volatility-adaptive trailing stop with partial close strategy
+Since you'd rather I just make the call — here's what I'd actually add, and why, staying scoped to the trailing logic itself (not touching entries, lot sizing, or partial-close, which is still a separate pending item):
+
+
+Ran 2 commands
+Ran 2 commands
+Adding the new header block first:
+
+
+Add v3 header describing the two trailing stop improvements
+Add v3 header describing the two trailing stop improvements
+Now add the new inputs (Tier 3 + giveback guard):
+
+
+Viewed 2 files, edited a file
+Viewed 2 files, edited a file
+Now update GetProgressiveTrailMult() to include Tier 3:
+
+
+Add Tier 3 check to progressive trail mult helper
+Add Tier 3 check to progressive trail mult helper
+Now wire the giveback guard candidate into ManageTrailing() for both BUY and SELL branches:
+
+
+Refactored code structure and variable scope management
+Refactored code structure and variable scope management
+Let me clean up a sloppy bit in the guard print message — I left placeholder junk in the BUY branch:
+
+
+Fix BUY branch to properly track and print peak profit for the guard stage
+Fix BUY branch to properly track and print peak profit for the guard stage
+Now let's update the init print block to log the new tier and guard settings:
+
+
+Ran a command, viewed a file, edited a file
+Ran a command, viewed a file, edited a file
+Now let's also update the top-of-function comment for ManageTrailing() to mention the third stage, then sanity-check braces:
+
+
+Ran a command, viewed a file, edited a file
+Ran a command, viewed a file, edited a file
+Now let's sanity-check braces and re-view the final ManageTrailing() block for correctness:
+
+
+Ran 2 commands
+Ran 2 commands
+Good — that imbalance already existed in v2's comments (prose parentheses), unchanged by my edit, so no new syntax issue. Let's view the final trailing block once more end-to-end:
+
+
+Final review of updated ManageTrailing function
+Final review of updated ManageTrailing function
+This all reads correctly. Now let's save it to outputs and present it.
+
+
+Ran a command, read a file
+Ran a command, read a file
+ZX_PP_M5_v3.mq5 (v5.12) — two additions to ManageTrailing(), both toggleable, both purely additive to what's already there:
+
+1. Third profit-lock tier. Tiers 1-2 (1x/2x ATR profit → 0.5x/0.3x trail mult) used to hold flat at 0.3x forever past 2x ATR. New Tier 3 (ProfitLock_Tier3_ATR_Trigger=3.5, ProfitLock_Tier3_Mult=0.2) tightens further once a trend is clearly extended — a trade running 4-5x ATR was giving back proportionally more of a big winner than a small one; now it doesn't.
+
+2. Giveback guard — the more interesting one. Your ATR trail's distance is a function of current ATR, which is itself a lagging average. If a trade spikes hard in its favor on one or two bars and then reverses fast, the ATR trail can still hand back a big chunk before it catches up. The guard adds a third, independent candidate stop: it finds the best favorable price the trade has ever touched (via iHighest/iLowest over the position's own lifetime — no persistent state, so it survives EA/terminal restarts) and locks in at least 100 - Giveback_Max_Pct% of that peak, default 65%. Same ratchet-forward-only rule applies, so it can only tighten, never loosen, and never fires before Trail_StartPoints.
+
+Both are on by default; flip UseGivebackGuard=false or UseProgressiveProfitLock=false to A/B against v2 exactly as you've done with everything else.
+
+One thing worth validating before you trust this live: Giveback_Max_Pct=35 is a reasonable starting guess, not a backtested number — it's exactly the kind of parameter that should go through the walk-forward validation across regimes that's already on your list, since the right value probably differs between a choppy range and a strong trend day.
+
+===================================================================================================================================================================
+

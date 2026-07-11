@@ -190,7 +190,7 @@ input double Ladder_LotStep             = 0.01;  // Lot decrease per subsequent 
 input double Ladder_FloorLot            = 0.20;  // Never go below this lot size - holds here once reached
 input int    Ladder_HedgeStartTrade     = 6;      // Trade # from which the loss-triggered equal-lot hedge rule applies
 input double Ladder_HedgeTriggerDollars = 20.0;   // Floating loss (on that specific trade) that triggers the hedge
-input double Ladder_HedgeCloseInProfit  = 0.50;   // Close BOTH hedge legs once their COMBINED floating profit reaches this
+input double Ladder_HedgeCloseInProfit  = 12.36;   // Close BOTH hedge legs once their COMBINED floating profit reaches this
 input int    Ladder_MinTrendScore       = 3;      // 0-3: how many of the 3 timeframes must still agree with the ladder direction to re-enter
 input double Ladder_MinVolumeRatio      = 1.0;    // Latest closed M5 candle's volume vs its own N-bar average must be >= this to re-enter
 input int    Ladder_VolumeAvgBars       = 10;      // N-bar window for the volume average above
